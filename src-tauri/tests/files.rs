@@ -233,6 +233,8 @@ fn rejects_fifo_without_blocking() {
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn rejects_non_utf8_canonical_paths() {
+    // macOS filesystem APIs reject invalid UTF-8 path creation with EILSEQ, so this
+    // deterministic fixture is exercised only on Unix platforms that permit it.
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
