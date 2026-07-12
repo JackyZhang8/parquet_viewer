@@ -165,7 +165,7 @@ pub async fn reload_file(
 }
 
 #[tauri::command]
-pub fn close_file(file_id: String, state: State<'_, AppState>) -> Result<(), AppError> {
+pub async fn close_file(file_id: String, state: State<'_, AppState>) -> Result<(), AppError> {
     state.files.remove(&file_id)
 }
 
@@ -274,5 +274,27 @@ fn display_type(field: &SchemaType) -> String {
             PhysicalType::FIXED_LEN_BYTE_ARRAY => "FIXED_BINARY".into(),
         },
         None => "STRUCT".into(),
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use tauri::Manager;
+
+    use super::{AppState, close_file};
+    use crate::error::AppError;
+
+    #[test]
+    fn close_file_command_is_awaitable_and_keeps_registry_error_mapping() {
+        let app = tauri::test::mock_builder()
+            .manage(AppState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let result = tauri::async_runtime::block_on(close_file(
+            "missing-file-id".into(),
+            app.state::<AppState>(),
+        ));
+
+        assert!(matches!(result, Err(AppError::InvalidPath(_))));
     }
 }
