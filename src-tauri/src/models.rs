@@ -194,7 +194,7 @@ pub struct QueryBatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionSnapshot {
     pub version: u32,
     pub tabs: Vec<SessionTab>,
@@ -203,7 +203,7 @@ pub struct SessionSnapshot {
 
 /// Persisted tab state intentionally excludes transient query IDs and result rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionTab {
     pub id: String,
     pub file_id: String,
@@ -215,7 +215,7 @@ pub struct SessionTab {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionFilter {
     pub column: String,
     pub operator: SessionFilterOperator,
@@ -248,7 +248,7 @@ pub enum SessionScalar {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionSort {
     pub column: String,
     pub direction: SessionSortDirection,
@@ -263,7 +263,7 @@ pub enum SessionSortDirection {
 
 /// Numeric UI state uses fixed-width integers, keeping every value JavaScript-safe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionViewState {
     pub scroll_top: u32,
     pub scroll_left: u32,
@@ -485,5 +485,68 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<SessionFilter>(nested_rows).is_err());
+    }
+
+    #[test]
+    fn session_snapshot_rejects_unknown_top_level_query_id() {
+        let snapshot = json!({
+            "version": 1,
+            "tabs": [],
+            "activeTabId": null,
+            "queryId": "query-1"
+        });
+
+        assert!(serde_json::from_value::<SessionSnapshot>(snapshot).is_err());
+    }
+
+    #[test]
+    fn session_tab_rejects_unknown_nested_result_rows() {
+        let snapshot = json!({
+            "version": 1,
+            "tabs": [{
+                "id": "tab-1",
+                "fileId": "file-1",
+                "path": "/tmp/users.parquet",
+                "sqlDraft": "select 1",
+                "filters": [],
+                "sorts": [],
+                "viewState": {
+                    "scrollTop": 0,
+                    "scrollLeft": 0,
+                    "sidebarWidth": 320,
+                    "editorHeight": 180
+                },
+                "rows": [["private result"]]
+            }],
+            "activeTabId": "tab-1"
+        });
+
+        assert!(serde_json::from_value::<SessionSnapshot>(snapshot).is_err());
+    }
+
+    #[test]
+    fn nested_session_dtos_reject_unknown_query_fields() {
+        let filter = json!({
+            "column": "user_id",
+            "operator": "eq",
+            "value": 1,
+            "queryId": "query-1"
+        });
+        let sort = json!({
+            "column": "user_id",
+            "direction": "asc",
+            "rows": []
+        });
+        let view_state = json!({
+            "scrollTop": 0,
+            "scrollLeft": 0,
+            "sidebarWidth": 320,
+            "editorHeight": 180,
+            "queryId": "query-1"
+        });
+
+        assert!(serde_json::from_value::<SessionFilter>(filter).is_err());
+        assert!(serde_json::from_value::<SessionSort>(sort).is_err());
+        assert!(serde_json::from_value::<SessionViewState>(view_state).is_err());
     }
 }
