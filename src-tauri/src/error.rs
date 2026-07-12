@@ -43,8 +43,8 @@ impl AppError {
             | Self::StaleFile(message)
             | Self::Sql(message)
             | Self::Cancelled(message)
-            | Self::ResourceExhausted(message)
-            | Self::Internal(message) => message,
+            | Self::ResourceExhausted(message) => message,
+            Self::Internal(_) => "An internal error occurred",
         }
     }
 }
@@ -100,7 +100,6 @@ mod tests {
                 AppError::ResourceExhausted("message".into()),
                 "RESOURCE_EXHAUSTED",
             ),
-            (AppError::Internal("message".into()), "INTERNAL_ERROR"),
         ];
 
         for (error, code) in cases {
@@ -109,5 +108,21 @@ mod tests {
                 json!({ "code": code, "message": "message", "detail": null })
             );
         }
+    }
+
+    #[test]
+    fn internal_error_redacts_private_context_from_the_wire() {
+        let sensitive = "failed at /Users/alice/private.parquet: select secret from payroll";
+        let error = AppError::Internal(sensitive.into());
+
+        assert_eq!(error.to_string(), sensitive);
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "code": "INTERNAL_ERROR",
+                "message": "An internal error occurred",
+                "detail": null
+            })
+        );
     }
 }

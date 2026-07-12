@@ -24,8 +24,8 @@ export interface FileMetadata {
   fileId: string
   path: string
   name: string
-  sizeBytes: number
-  rowCount: number
+  sizeBytes: string
+  rowCount: string
   rowGroupCount: number
   columns: ColumnSchema[]
 }
@@ -44,11 +44,20 @@ export interface QueryStarted {
 
 export interface QueryBatch {
   queryId: string
-  rows: unknown[][]
+  rows: CellValue[][]
   done: boolean
-  returnedRows: number
-  elapsedMs: number
+  returnedRows: string
+  elapsedMs: string
 }
+
+/** Unsafe signed/unsigned integers cross the wire as decimal strings. */
+export type CellValue =
+  | null
+  | boolean
+  | number
+  | string
+  | CellValue[]
+  | { [key: string]: CellValue }
 
 export interface SessionSnapshot {
   version: number
@@ -62,7 +71,82 @@ export interface SessionTab {
   fileId: string
   path: string
   sqlDraft: string
-  filters: unknown
-  sorts: unknown
-  viewState: unknown
+  filters: SessionFilter[]
+  sorts: SessionSort[]
+  viewState: SessionViewState
 }
+
+export interface SessionFilter {
+  column: string
+  operator: SessionFilterOperator
+  value: SessionScalar
+}
+
+export type SessionFilterOperator =
+  | 'eq'
+  | 'notEq'
+  | 'lt'
+  | 'lte'
+  | 'gt'
+  | 'gte'
+  | 'contains'
+  | 'startsWith'
+  | 'endsWith'
+  | 'isNull'
+  | 'isNotNull'
+
+export type SessionScalar = null | boolean | number | string
+
+export interface SessionSort {
+  column: string
+  direction: 'asc' | 'desc'
+}
+
+export interface SessionViewState {
+  scrollTop: number
+  scrollLeft: number
+  sidebarWidth: number
+  editorHeight: number
+}
+
+const APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
+  'INVALID_PATH',
+  'PERMISSION_DENIED',
+  'INVALID_PARQUET',
+  'STALE_FILE',
+  'SQL_ERROR',
+  'CANCELLED',
+  'RESOURCE_EXHAUSTED',
+  'INTERNAL_ERROR',
+])
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isDecimalString = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d+$/.test(value)
+
+const isCellValue = (value: unknown): value is CellValue => {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return true
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value))
+  }
+  if (Array.isArray(value)) return value.every(isCellValue)
+  return isRecord(value) && Object.values(value).every(isCellValue)
+}
+
+export const isAppError = (value: unknown): value is AppError =>
+  isRecord(value) &&
+  typeof value.code === 'string' &&
+  APP_ERROR_CODES.has(value.code) &&
+  typeof value.message === 'string' &&
+  (value.detail === null || typeof value.detail === 'string')
+
+export const isQueryBatch = (value: unknown): value is QueryBatch =>
+  isRecord(value) &&
+  typeof value.queryId === 'string' &&
+  Array.isArray(value.rows) &&
+  value.rows.every((row) => Array.isArray(row) && row.every(isCellValue)) &&
+  typeof value.done === 'boolean' &&
+  isDecimalString(value.returnedRows) &&
+  isDecimalString(value.elapsedMs)

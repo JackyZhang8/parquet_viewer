@@ -1,5 +1,147 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use std::collections::BTreeMap;
+use std::fmt;
+
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+mod u64_decimal {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(value)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// JSON-compatible query cell. Integers outside JavaScript's safe range serialize as strings.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CellValue {
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(String),
+    Signed(i64),
+    Unsigned(u64),
+    Array(Vec<CellValue>),
+    Object(BTreeMap<String, CellValue>),
+}
+
+impl Serialize for CellValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Null => serializer.serialize_none(),
+            Self::Bool(value) => serializer.serialize_bool(*value),
+            Self::Number(value)
+                if value.fract() == 0.0 && value.abs() > MAX_SAFE_INTEGER as f64 =>
+            {
+                serializer.collect_str(value)
+            }
+            Self::Number(value) => serializer.serialize_f64(*value),
+            Self::String(value) => serializer.serialize_str(value),
+            Self::Signed(value)
+                if (-(MAX_SAFE_INTEGER as i64)..=MAX_SAFE_INTEGER as i64).contains(value) =>
+            {
+                serializer.serialize_i64(*value)
+            }
+            Self::Signed(value) => serializer.collect_str(value),
+            Self::Unsigned(value) if *value <= MAX_SAFE_INTEGER => serializer.serialize_u64(*value),
+            Self::Unsigned(value) => serializer.collect_str(value),
+            Self::Array(values) => values.serialize(serializer),
+            Self::Object(values) => values.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CellValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CellValueVisitor;
+
+        impl<'de> Visitor<'de> for CellValueVisitor {
+            type Value = CellValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON-compatible query cell")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(CellValue::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(CellValue::Null)
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(CellValue::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(CellValue::Signed(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(CellValue::Unsigned(value))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(CellValue::Number(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(CellValue::String(value.into()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(CellValue::String(value))
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = sequence.next_element()? {
+                    values.push(value);
+                }
+                Ok(CellValue::Array(values))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut values = BTreeMap::new();
+                while let Some((key, value)) = map.next_entry()? {
+                    values.insert(key, value);
+                }
+                Ok(CellValue::Object(values))
+            }
+        }
+
+        deserializer.deserialize_any(CellValueVisitor)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,9 +157,11 @@ pub struct FileMetadata {
     pub file_id: String,
     pub path: String,
     pub name: String,
+    #[serde(with = "u64_decimal")]
     pub size_bytes: u64,
+    #[serde(with = "u64_decimal")]
     pub row_count: u64,
-    pub row_group_count: u64,
+    pub row_group_count: u32,
     pub columns: Vec<ColumnSchema>,
 }
 
@@ -27,7 +171,7 @@ pub struct QueryRequest {
     pub file_id: String,
     pub sql: String,
     pub batch_size: u32,
-    pub preview_limit: u64,
+    pub preview_limit: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,9 +185,11 @@ pub struct QueryStarted {
 #[serde(rename_all = "camelCase")]
 pub struct QueryBatch {
     pub query_id: String,
-    pub rows: Vec<Vec<Value>>,
+    pub rows: Vec<Vec<CellValue>>,
     pub done: bool,
+    #[serde(with = "u64_decimal")]
     pub returned_rows: u64,
+    #[serde(with = "u64_decimal")]
     pub elapsed_ms: u64,
 }
 
@@ -63,16 +209,74 @@ pub struct SessionTab {
     pub file_id: String,
     pub path: String,
     pub sql_draft: String,
-    pub filters: Value,
-    pub sorts: Value,
-    pub view_state: Value,
+    pub filters: Vec<SessionFilter>,
+    pub sorts: Vec<SessionSort>,
+    pub view_state: SessionViewState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFilter {
+    pub column: String,
+    pub operator: SessionFilterOperator,
+    pub value: SessionScalar,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionFilterOperator {
+    Eq,
+    NotEq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Contains,
+    StartsWith,
+    EndsWith,
+    IsNull,
+    IsNotNull,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SessionScalar {
+    Null,
+    Bool(bool),
+    Number(serde_json::Number),
+    String(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSort {
+    pub column: String,
+    pub direction: SessionSortDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionSortDirection {
+    Asc,
+    Desc,
+}
+
+/// Numeric UI state uses fixed-width integers, keeping every value JavaScript-safe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionViewState {
+    pub scroll_top: u32,
+    pub scroll_left: u32,
+    pub sidebar_width: u16,
+    pub editor_height: u16,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ColumnSchema, FileMetadata, QueryBatch, QueryRequest, QueryStarted, SessionSnapshot,
-        SessionTab,
+        CellValue, ColumnSchema, FileMetadata, QueryBatch, QueryRequest, QueryStarted,
+        SessionFilter, SessionFilterOperator, SessionScalar, SessionSnapshot, SessionSort,
+        SessionSortDirection, SessionTab, SessionViewState,
     };
     use serde_json::json;
 
@@ -93,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn file_metadata_serializes_with_camel_case_fields_and_numbers() {
+    fn file_metadata_serializes_large_counters_as_decimal_strings() {
         let metadata = FileMetadata {
             file_id: "file-1".into(),
             path: "/tmp/users.parquet".into(),
@@ -110,8 +314,8 @@ mod tests {
                 "fileId": "file-1",
                 "path": "/tmp/users.parquet",
                 "name": "users.parquet",
-                "sizeBytes": 4_294_967_296_u64,
-                "rowCount": 9_007,
+                "sizeBytes": "4294967296",
+                "rowCount": "9007",
                 "rowGroupCount": 3,
                 "columns": [{ "name": "user_id", "logicalType": "BIGINT", "nullable": true }]
             })
@@ -132,7 +336,11 @@ mod tests {
         };
         let batch = QueryBatch {
             query_id: "query-1".into(),
-            rows: vec![vec![json!(7), json!(null), json!("Ada")]],
+            rows: vec![vec![
+                CellValue::Signed(7),
+                CellValue::Null,
+                CellValue::String("Ada".into()),
+            ]],
             done: false,
             returned_rows: 1,
             elapsed_ms: 12,
@@ -160,9 +368,32 @@ mod tests {
                 "queryId": "query-1",
                 "rows": [[7, null, "Ada"]],
                 "done": false,
-                "returnedRows": 1,
-                "elapsedMs": 12
+                "returnedRows": "1",
+                "elapsedMs": "12"
             })
+        );
+    }
+
+    #[test]
+    fn cell_values_preserve_integer_precision_at_the_javascript_boundary() {
+        const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+        let cells = vec![
+            CellValue::Signed(MAX_SAFE_INTEGER),
+            CellValue::Signed(MAX_SAFE_INTEGER + 1),
+            CellValue::Signed(i64::MAX),
+            CellValue::Unsigned(u64::MAX),
+            CellValue::Number(9_007_199_254_740_992.0),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(cells).unwrap(),
+            json!([
+                9_007_199_254_740_991_i64,
+                "9007199254740992",
+                "9223372036854775807",
+                "18446744073709551615",
+                "9007199254740992"
+            ])
         );
     }
 
@@ -175,9 +406,21 @@ mod tests {
                 file_id: "file-1".into(),
                 path: "/tmp/users.parquet".into(),
                 sql_draft: "select * from parquet_file".into(),
-                filters: json!([{ "column": "active", "operator": "eq", "value": true }]),
-                sorts: json!([{ "column": "user_id", "direction": "asc" }]),
-                view_state: json!({ "scrollTop": 240, "selectedColumn": null }),
+                filters: vec![SessionFilter {
+                    column: "active".into(),
+                    operator: SessionFilterOperator::Eq,
+                    value: SessionScalar::Bool(true),
+                }],
+                sorts: vec![SessionSort {
+                    column: "user_id".into(),
+                    direction: SessionSortDirection::Asc,
+                }],
+                view_state: SessionViewState {
+                    scroll_top: 240,
+                    scroll_left: 0,
+                    sidebar_width: 320,
+                    editor_height: 180,
+                },
             }],
             active_tab_id: Some("tab-1".into()),
         };
@@ -194,7 +437,12 @@ mod tests {
                     "sqlDraft": "select * from parquet_file",
                     "filters": [{ "column": "active", "operator": "eq", "value": true }],
                     "sorts": [{ "column": "user_id", "direction": "asc" }],
-                    "viewState": { "scrollTop": 240, "selectedColumn": null }
+                    "viewState": {
+                        "scrollTop": 240,
+                        "scrollLeft": 0,
+                        "sidebarWidth": 320,
+                        "editorHeight": 180
+                    }
                 }],
                 "activeTabId": "tab-1"
             })
@@ -215,5 +463,27 @@ mod tests {
             serde_json::to_value(snapshot).unwrap(),
             json!({ "version": 1, "tabs": [], "activeTabId": null })
         );
+    }
+
+    #[test]
+    fn session_filter_rejects_nested_query_result_values() {
+        let nested_result = json!({
+            "column": "user_id",
+            "operator": "eq",
+            "value": { "queryId": "query-1", "rows": [[1, 2, 3]] }
+        });
+
+        assert!(serde_json::from_value::<SessionFilter>(nested_result).is_err());
+    }
+
+    #[test]
+    fn session_filter_rejects_array_values() {
+        let nested_rows = json!({
+            "column": "user_id",
+            "operator": "eq",
+            "value": [1, 2, 3]
+        });
+
+        assert!(serde_json::from_value::<SessionFilter>(nested_rows).is_err());
     }
 }
