@@ -50,6 +50,37 @@ export interface QueryBatch {
   elapsedMs: string
 }
 
+export type FilterOperator =
+  | 'eq'
+  | 'notEq'
+  | 'lt'
+  | 'lte'
+  | 'gt'
+  | 'gte'
+  | 'contains'
+  | 'startsWith'
+  | 'endsWith'
+  | 'isNull'
+  | 'isNotNull'
+
+export interface FilterCondition {
+  column: string
+  operator: FilterOperator
+  value?: SessionScalar
+}
+
+export interface SortSpec {
+  column: string
+  direction: 'asc' | 'desc'
+}
+
+export interface FilterQueryRequest {
+  selectedColumns: string[]
+  filters: FilterCondition[]
+  sorts: SortSpec[]
+  previewLimit: number
+}
+
 /** Unsafe signed/unsigned integers cross the wire as decimal strings. */
 export type CellValue =
   | null

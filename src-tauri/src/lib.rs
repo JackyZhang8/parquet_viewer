@@ -1,5 +1,6 @@
 pub mod error;
 pub mod files;
+pub mod filters;
 pub mod models;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
