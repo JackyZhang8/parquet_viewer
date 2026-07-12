@@ -19,8 +19,12 @@ use crate::models::{CellValue, ColumnSchema, QueryBatch};
 const MAX_RESULT_COLUMNS: usize = 512;
 const MAX_BATCH_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 
-pub(super) fn worker_loop(jobs: Receiver<QueryJob>) {
-    while let Ok(job) = jobs.recv() {
+pub(super) fn worker_loop(jobs: Receiver<QueryJob>, replacements: Receiver<QueryJob>) {
+    loop {
+        let job = crossbeam_channel::select_biased! {
+            recv(replacements) -> job => match job { Ok(job) => job, Err(_) => break },
+            recv(jobs) -> job => match job { Ok(job) => job, Err(_) => break },
+        };
         job.counters.queued.fetch_sub(1, Ordering::AcqRel);
         job.counters.running.fetch_add(1, Ordering::AcqRel);
         let _running = RunningGuard(job.counters.clone());

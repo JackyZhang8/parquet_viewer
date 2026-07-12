@@ -29,6 +29,7 @@ const MAX_BATCH_SIZE: u32 = 5_000;
 const MAX_PREVIEW_LIMIT: u32 = 100_000;
 const WORKER_COUNT: usize = 2;
 const JOB_QUEUE_CAPACITY: usize = 2;
+const REPLACEMENT_QUEUE_CAPACITY: usize = 1;
 const BATCH_QUEUE_CAPACITY: usize = 2;
 
 type BatchResult = Result<QueryBatch, AppError>;
@@ -70,6 +71,7 @@ pub(super) struct WorkerCounters {
 pub struct QueryService {
     cursors: Arc<Mutex<HashMap<String, Cursor>>>,
     jobs: Sender<QueryJob>,
+    replacement_jobs: Sender<QueryJob>,
     admission: Arc<Admission>,
     counters: Arc<WorkerCounters>,
 }
@@ -77,16 +79,20 @@ pub struct QueryService {
 impl Default for QueryService {
     fn default() -> Self {
         let (jobs, receiver) = bounded::<QueryJob>(JOB_QUEUE_CAPACITY);
+        let (replacement_jobs, replacement_receiver) =
+            bounded::<QueryJob>(REPLACEMENT_QUEUE_CAPACITY);
         for index in 0..WORKER_COUNT {
             let receiver = receiver.clone();
+            let replacement_receiver = replacement_receiver.clone();
             thread::Builder::new()
                 .name(format!("parquet-query-{index}"))
-                .spawn(move || worker_loop(receiver))
+                .spawn(move || worker_loop(receiver, replacement_receiver))
                 .expect("failed to start query worker");
         }
         Self {
             cursors: Arc::new(Mutex::new(HashMap::new())),
             jobs,
+            replacement_jobs,
             admission: Arc::new(Admission::default()),
             counters: Arc::new(WorkerCounters::default()),
         }
@@ -109,7 +115,6 @@ impl QueryService {
                 "Preview limit must be between 1 and 100000".into(),
             ));
         }
-        let permit = self.reserve_admission()?;
         let normalized_sql = validate_user_sql(&request.sql)?;
         let source = files.resolve_query_source(&request.file_id)?;
         let execution_sql = format!("SELECT * FROM ({normalized_sql}) AS __preview LIMIT ?");
@@ -126,7 +131,6 @@ impl QueryService {
             schema_sql,
             Vec::new(),
             false,
-            permit,
         )
     }
 
@@ -140,7 +144,6 @@ impl QueryService {
                 "Batch size must be between 1 and 5000".into(),
             ));
         }
-        let permit = self.reserve_admission()?;
         let source = files.resolve_query_source(&request.file_id)?;
         let metadata = files
             .get(&request.file_id)
@@ -164,7 +167,6 @@ impl QueryService {
             schema_sql,
             compiled.params,
             false,
-            permit,
         )
     }
 
@@ -180,21 +182,13 @@ impl QueryService {
         schema_sql: String,
         schema_params: Vec<BoundValue>,
         panic_for_test: bool,
-        permit: Arc<AdmissionPermit>,
     ) -> Result<QueryStarted, AppError> {
         let query_id = Uuid::new_v4().to_string();
         let (batch_sender, batch_receiver) = bounded(BATCH_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = bounded(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let interrupt = Arc::new(Mutex::new(None));
-        let cursor = Cursor {
-            file_id: file_id.clone(),
-            batches: batch_receiver,
-            cancelled: cancelled.clone(),
-            interrupt: interrupt.clone(),
-            _permit: permit.clone(),
-        };
-        let displaced = {
+        let (displaced, permit) = {
             let mut cursors = self.cursors.lock();
             let replaced = cursors
                 .iter()
@@ -205,9 +199,26 @@ impl QueryService {
                 .into_iter()
                 .filter_map(|id| cursors.remove(&id))
                 .collect::<Vec<_>>();
+            let permit = if let Some(cursor) = displaced.first() {
+                cursor._permit.clone()
+            } else {
+                self.admission.try_acquire().ok_or_else(|| {
+                    AppError::ResourceExhausted(
+                        "Too many queries are already running or queued".into(),
+                    )
+                })?
+            };
+            let cursor = Cursor {
+                file_id: file_id.clone(),
+                batches: batch_receiver,
+                cancelled: cancelled.clone(),
+                interrupt: interrupt.clone(),
+                _permit: permit.clone(),
+            };
             cursors.insert(query_id.clone(), cursor);
-            displaced
+            (displaced, permit)
         };
+        let is_replacement = !displaced.is_empty();
         for cursor in displaced {
             cancel_cursor(cursor);
         }
@@ -229,7 +240,12 @@ impl QueryService {
             counters: self.counters.clone(),
         };
         self.counters.queued.fetch_add(1, Ordering::AcqRel);
-        if let Err(error) = self.jobs.try_send(job) {
+        let sender = if is_replacement {
+            &self.replacement_jobs
+        } else {
+            &self.jobs
+        };
+        if let Err(error) = sender.try_send(job) {
             self.counters.queued.fetch_sub(1, Ordering::AcqRel);
             if let Some(cursor) = self.cursors.lock().remove(&query_id) {
                 cancel_cursor(cursor);
@@ -300,12 +316,6 @@ impl QueryService {
         self.cursors.lock().len()
     }
 
-    fn reserve_admission(&self) -> Result<Arc<AdmissionPermit>, AppError> {
-        self.admission.try_acquire().ok_or_else(|| {
-            AppError::ResourceExhausted("Too many queries are already running or queued".into())
-        })
-    }
-
     #[cfg(test)]
     pub fn admitted_count_for_test(&self) -> usize {
         self.admission.count()
@@ -333,7 +343,6 @@ impl QueryService {
         files: &FileRegistry,
     ) -> Result<QueryStarted, AppError> {
         let source = files.resolve_query_source(&file_id)?;
-        let permit = self.reserve_admission()?;
         self.enqueue_query(
             file_id,
             1,
@@ -344,7 +353,6 @@ impl QueryService {
             "SELECT * FROM data LIMIT 0".into(),
             Vec::new(),
             true,
-            permit,
         )
     }
 }

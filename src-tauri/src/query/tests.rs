@@ -678,6 +678,14 @@ fn admission_rejects_fifth_outstanding_query_without_publishing_cursor() {
     assert_eq!(service.admitted_count_for_test(), 4);
     assert!(service.running_count_for_test() <= 2);
     assert!(service.queued_count_for_test() <= 2);
+    let replacement = service
+        .start_query(
+            request(files[0].clone(), "SELECT id FROM data", 1, 20),
+            &registry,
+        )
+        .unwrap();
+    assert_eq!(service.admitted_count_for_test(), 4);
+    assert_eq!(service.active_cursor_count(), 4);
     assert!(matches!(
         service.start_query(
             request(files[4].clone(), "SELECT * FROM data", 1, 20),
@@ -686,13 +694,41 @@ fn admission_rejects_fifth_outstanding_query_without_publishing_cursor() {
         Err(crate::error::AppError::ResourceExhausted(_))
     ));
     assert!(service.active_cursor_count() <= 4);
-    service.cancel_query(&first.query_id).unwrap();
+    assert!(service.cancel_query(&first.query_id).is_err());
+    service.cancel_query(&replacement.query_id).unwrap();
     service.cancel_query(&second.query_id).unwrap();
     for handle in queued {
         let started = handle.join().unwrap().unwrap();
         service.cancel_query(&started.query_id).unwrap();
     }
     service.wait_for_admitted_for_test(0);
+}
+
+#[test]
+fn rapid_same_file_replacements_share_one_bounded_admission() {
+    let (_directory, registry, file_id) = registered_fixture(20);
+    let service = QueryService::default();
+    let mut current = service
+        .start_query(
+            request(file_id.clone(), "SELECT * FROM data", 1, 20),
+            &registry,
+        )
+        .unwrap();
+    for _ in 0..12 {
+        current = service
+            .start_query(
+                request(file_id.clone(), "SELECT id FROM data", 1, 20),
+                &registry,
+            )
+            .unwrap();
+        assert_eq!(service.active_cursor_count(), 1);
+        assert_eq!(service.admitted_count_for_test(), 1);
+        assert!(service.running_count_for_test() <= 2);
+        assert!(service.queued_count_for_test() <= 3);
+    }
+    service.cancel_query(&current.query_id).unwrap();
+    service.wait_for_admitted_for_test(0);
+    assert_eq!(service.active_cursor_count(), 0);
 }
 
 #[test]
