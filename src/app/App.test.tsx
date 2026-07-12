@@ -27,12 +27,31 @@ it('hydrates, subscribes/unsubscribes drops, and switches from empty intake to w
   expect(desktop.loadSession).toHaveBeenCalledTimes(1)
   drop?.(['/drop.parquet'])
   await waitFor(() => expect(screen.getByRole('tab', { name: /drop.parquet/i })).toBeInTheDocument())
-  expect(screen.getByText('File opened')).toBeInTheDocument()
-  expect(screen.queryByText('Schema')).not.toBeInTheDocument()
+  expect(screen.getByText('Schema')).toBeInTheDocument()
   expect(screen.queryByRole('textbox', { name: /sql/i })).not.toBeInTheDocument()
   expect(screen.queryByText('Data')).not.toBeInTheDocument()
   view.unmount()
   await waitFor(() => expect(unlisten).toHaveBeenCalled())
+})
+
+it('keeps filters isolated when switching ready tabs and introduces no result grid or SQL editor', async () => {
+  const desktop = api()
+  vi.mocked(desktop.loadSession).mockResolvedValue({snapshot:{version:1,activeTabId:'a',tabs:[
+    {id:'a',fileId:'a',path:'/a.parquet',sqlDraft:'',filters:[],sorts:[],viewState:{scrollTop:0,scrollLeft:0,sidebarWidth:260,editorHeight:180}},
+    {id:'b',fileId:'b',path:'/b.parquet',sqlDraft:'',filters:[],sorts:[],viewState:{scrollTop:0,scrollLeft:0,sidebarWidth:260,editorHeight:180}},
+  ]},unavailableTabIds:[],warning:null})
+  vi.mocked(desktop.openFiles).mockImplementation(async (paths) => paths.map((path)=>({ok:true as const,metadata:{fileId:path.slice(1,2),path,name:path.slice(1),sizeBytes:'1',rowCount:'1',rowGroupCount:1,columns:[{name:'id',logicalType:'INT64',nullable:false}]}})))
+  render(<App api={desktop} />)
+  await userEvent.type(await screen.findByLabelText('Filter value'),'1')
+  await userEvent.click(screen.getByRole('button',{name:'Add condition'}))
+  expect(screen.getByText(/id equals/i)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('tab',{name:/b.parquet/i}))
+  expect(screen.queryByText(/id equals/i)).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('tab',{name:/a.parquet/i}))
+  expect(screen.getByText(/id equals/i)).toBeInTheDocument()
+  expect(screen.queryByRole('grid')).not.toBeInTheDocument()
+  expect(screen.queryByRole('textbox',{name:/sql/i})).not.toBeInTheDocument()
+  expect(screen.getByText(/results arrive in task 9/i)).toBeInTheDocument()
 })
 
 it('opens picker files from the workspace toolbar', async () => {
