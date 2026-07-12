@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Default capability for the main Parquet Viewer window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "opener:allow-reveal-item-in-dir"
+  ]
 }

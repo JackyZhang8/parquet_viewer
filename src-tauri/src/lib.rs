@@ -37,6 +37,8 @@ impl Default for AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let session_path = app.path().app_config_dir()?.join("session.json");
             app.manage(AppState::with_session_path(session_path));
