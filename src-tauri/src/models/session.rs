@@ -1,4 +1,7 @@
 use serde::ser::SerializeStruct;
+use std::fmt;
+
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,70 +103,99 @@ impl<'de> Deserialize<'de> for SessionScalar {
     where
         D: Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let mut object = value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| serde::de::Error::custom("session scalar must be an object"))?;
-        let kind = object
-            .remove("type")
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .ok_or_else(|| serde::de::Error::custom("session scalar requires a string type"))?;
+        struct SessionScalarVisitor;
 
-        if kind == "null" {
-            return if object.is_empty() {
-                Ok(Self::Null)
+        impl<'de> Visitor<'de> for SessionScalarVisitor {
+            type Value = SessionScalar;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a strictly tagged session scalar object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut kind = None;
+                let mut scalar_value = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "type" => {
+                            if kind.is_some() {
+                                return Err(serde::de::Error::duplicate_field("type"));
+                            }
+                            kind = Some(map.next_value::<String>()?);
+                        }
+                        "value" => {
+                            if scalar_value.is_some() {
+                                return Err(serde::de::Error::duplicate_field("value"));
+                            }
+                            scalar_value = Some(map.next_value::<serde_json::Value>()?);
+                        }
+                        _ => return Err(serde::de::Error::unknown_field(&key, &["type", "value"])),
+                    }
+                }
+
+                decode_scalar::<A::Error>(kind, scalar_value)
+            }
+        }
+
+        deserializer.deserialize_map(SessionScalarVisitor)
+    }
+}
+
+fn decode_scalar<E>(
+    kind: Option<String>,
+    scalar_value: Option<serde_json::Value>,
+) -> Result<SessionScalar, E>
+where
+    E: serde::de::Error,
+{
+    let kind = kind.ok_or_else(|| E::missing_field("type"))?;
+    if kind == "null" {
+        return if scalar_value.is_none() {
+            Ok(SessionScalar::Null)
+        } else {
+            Err(E::custom("null session scalar cannot contain a value"))
+        };
+    }
+
+    let scalar_value = scalar_value.ok_or_else(|| E::missing_field("value"))?;
+    match kind.as_str() {
+        "boolean" => scalar_value
+            .as_bool()
+            .map(SessionScalar::Boolean)
+            .ok_or_else(|| E::custom("boolean scalar requires a boolean value")),
+        "number" => {
+            let number = scalar_value
+                .as_f64()
+                .ok_or_else(|| E::custom("number scalar requires a numeric value"))?;
+            if number.is_finite() && number.fract() != 0.0 {
+                Ok(SessionScalar::Number(number))
             } else {
-                Err(serde::de::Error::custom(
-                    "null session scalar cannot contain other fields",
+                Err(E::custom(
+                    "session scalar numbers must be finite and non-integer",
                 ))
-            };
-        }
-
-        let scalar_value = object
-            .remove("value")
-            .ok_or_else(|| serde::de::Error::custom("session scalar requires a value"))?;
-        if !object.is_empty() {
-            return Err(serde::de::Error::custom(
-                "session scalar contains unknown fields",
-            ));
-        }
-
-        match kind.as_str() {
-            "boolean" => scalar_value
-                .as_bool()
-                .map(Self::Boolean)
-                .ok_or_else(|| serde::de::Error::custom("boolean scalar requires a boolean value")),
-            "number" => {
-                let number = scalar_value.as_f64().ok_or_else(|| {
-                    serde::de::Error::custom("number scalar requires a numeric value")
-                })?;
-                if number.is_finite() && number.fract() != 0.0 {
-                    Ok(Self::Number(number))
-                } else {
-                    Err(serde::de::Error::custom(
-                        "session scalar numbers must be finite and non-integer",
-                    ))
-                }
             }
-            "integer" => {
-                let integer = scalar_value.as_str().ok_or_else(|| {
-                    serde::de::Error::custom("integer scalar requires a string value")
-                })?;
-                if is_canonical_integer(integer) {
-                    Ok(Self::Integer(integer.into()))
-                } else {
-                    Err(serde::de::Error::custom(
-                        "session scalar integer is not canonical or is out of range",
-                    ))
-                }
-            }
-            "string" => scalar_value
+        }
+        "integer" => {
+            let integer = scalar_value
                 .as_str()
-                .map(|value| Self::String(value.into()))
-                .ok_or_else(|| serde::de::Error::custom("string scalar requires a string value")),
-            _ => Err(serde::de::Error::custom("unknown session scalar type")),
+                .ok_or_else(|| E::custom("integer scalar requires a string value"))?;
+            if is_canonical_integer(integer) {
+                Ok(SessionScalar::Integer(integer.into()))
+            } else {
+                Err(E::custom(
+                    "session scalar integer is not canonical or is out of range",
+                ))
+            }
         }
+        "string" => scalar_value
+            .as_str()
+            .map(|value| SessionScalar::String(value.into()))
+            .ok_or_else(|| E::custom("string scalar requires a string value")),
+        _ => Err(E::custom("unknown session scalar type")),
     }
 }
 
@@ -408,5 +440,14 @@ mod tests {
         }
 
         assert!(serde_json::to_value(SessionScalar::Number(42.0)).is_err());
+    }
+
+    #[test]
+    fn session_scalar_rejects_duplicate_raw_json_fields() {
+        let duplicate_type = r#"{"type":"integer","type":"string","value":"42"}"#;
+        let duplicate_value = r#"{"type":"integer","value":"42","value":"43"}"#;
+
+        assert!(serde_json::from_str::<SessionScalar>(duplicate_type).is_err());
+        assert!(serde_json::from_str::<SessionScalar>(duplicate_value).is_err());
     }
 }

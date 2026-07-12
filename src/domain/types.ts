@@ -102,6 +102,69 @@ export type SessionScalar =
   | { type: 'integer'; value: string }
   | { type: 'string'; value: string }
 
+const I64_MIN = -(1n << 63n)
+const U64_MAX = (1n << 64n) - 1n
+const CANONICAL_INTEGER = /^(?:0|-[1-9]\d*|[1-9]\d*)$/
+
+const isCanonicalSessionInteger = (value: string): boolean => {
+  if (!CANONICAL_INTEGER.test(value)) return false
+  const integer = BigInt(value)
+  return integer >= I64_MIN && integer <= U64_MAX
+}
+
+export const sessionInteger = (value: string): SessionScalar => {
+  if (!CANONICAL_INTEGER.test(value)) {
+    throw new Error('Session integer must use canonical decimal syntax')
+  }
+  if (!isCanonicalSessionInteger(value)) {
+    throw new Error('Session integer is outside the supported i64/u64 range')
+  }
+  return { type: 'integer', value }
+}
+
+export const sessionScalarFromNumber = (value: number): SessionScalar => {
+  if (!Number.isFinite(value)) {
+    throw new Error('Session scalar number must be finite')
+  }
+  if (!Number.isInteger(value)) return { type: 'number', value }
+  if (!Number.isSafeInteger(value)) {
+    throw new Error('Unsafe integer requires an explicit decimal integer string')
+  }
+  return sessionInteger(String(Object.is(value, -0) ? 0 : value))
+}
+
+const hasExactKeys = (value: Record<string, unknown>, keys: string[]): boolean => {
+  const actual = Object.keys(value)
+  return actual.length === keys.length && keys.every((key) => actual.includes(key))
+}
+
+export const isSessionScalar = (value: unknown): value is SessionScalar => {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  switch (value.type) {
+    case 'null':
+      return hasExactKeys(value, ['type'])
+    case 'boolean':
+      return hasExactKeys(value, ['type', 'value']) && typeof value.value === 'boolean'
+    case 'number':
+      return (
+        hasExactKeys(value, ['type', 'value']) &&
+        typeof value.value === 'number' &&
+        Number.isFinite(value.value) &&
+        !Number.isInteger(value.value)
+      )
+    case 'integer':
+      return (
+        hasExactKeys(value, ['type', 'value']) &&
+        typeof value.value === 'string' &&
+        isCanonicalSessionInteger(value.value)
+      )
+    case 'string':
+      return hasExactKeys(value, ['type', 'value']) && typeof value.value === 'string'
+    default:
+      return false
+  }
+}
+
 export interface SessionSort {
   column: string
   direction: 'asc' | 'desc'
