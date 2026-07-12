@@ -3,7 +3,7 @@ name = "parquet-viewer"
 version = "0.1.0"
 description = "A read-only desktop Parquet viewer"
 authors = ["Parquet Viewer contributors"]
-edition = "2021"
+edition = "2024"
 
 [lib]
 name = "parquet_viewer_lib"
