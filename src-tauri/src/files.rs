@@ -20,6 +20,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 
+use crate::AppState;
 use crate::error::AppError;
 use crate::models::{ColumnSchema, FileMetadata};
 
@@ -149,6 +150,11 @@ struct LoadedFile {
     fingerprint: FileFingerprint,
 }
 
+pub(crate) struct QuerySource {
+    pub(crate) canonical_path: PathBuf,
+    pub(crate) fingerprint_token: String,
+}
+
 impl FileRegistry {
     pub fn open_paths(&self, paths: Vec<PathBuf>) -> Vec<Result<FileMetadata, AppError>> {
         paths.into_iter().map(|path| self.open_path(path)).collect()
@@ -241,11 +247,27 @@ impl FileRegistry {
         let current = fingerprint_from_open_file(&registered.canonical_path, &file)?;
         Ok(current != registered)
     }
-}
 
-#[derive(Default)]
-pub struct AppState {
-    pub files: FileRegistry,
+    pub(crate) fn resolve_query_source(&self, file_id: &str) -> Result<QuerySource, AppError> {
+        let registered = self
+            .inner
+            .lock()
+            .by_id
+            .get(file_id)
+            .map(|entry| entry.fingerprint.clone())
+            .ok_or_else(|| AppError::InvalidPath("Unknown file ID".into()))?;
+        let file = open_regular_file(&registered.canonical_path)?;
+        let current = fingerprint_from_open_file(&registered.canonical_path, &file)?;
+        if current != registered {
+            return Err(AppError::StaleFile(
+                "The file changed after it was opened; reload it before querying".into(),
+            ));
+        }
+        Ok(QuerySource {
+            canonical_path: registered.canonical_path,
+            fingerprint_token: format!("{}:{:?}", registered.size, registered.modified),
+        })
+    }
 }
 
 #[tauri::command]
@@ -273,6 +295,7 @@ pub async fn reload_file(
 
 #[tauri::command]
 pub async fn close_file(file_id: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    state.queries.close_file(&file_id);
     state.files.remove(&file_id)
 }
 
