@@ -16,6 +16,7 @@ const VERSION: u32 = 1;
 const MAX_TABS: usize = 100;
 const MAX_SQL_BYTES: usize = 256 * 1024;
 const MAX_SESSION_BYTES: usize = 4 * 1024 * 1024;
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 pub const SESSION_WARNING: &str = "The saved workspace could not be restored";
 
 #[derive(Clone)]
@@ -136,6 +137,7 @@ fn cleanup_stale_temps(parent: &Path, session_path: &Path) {
     let Ok(entries) = fs::read_dir(parent) else {
         return;
     };
+    let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         let Some(candidate) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -147,6 +149,15 @@ fn cleanup_stale_temps(parent: &Path, session_path: &Path) {
             continue;
         };
         if Uuid::parse_str(id).is_err() || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let is_stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > STALE_TEMP_AGE);
+        if !is_stale {
             continue;
         }
         let _ = fs::remove_file(entry.path());

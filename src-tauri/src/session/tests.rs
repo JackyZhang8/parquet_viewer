@@ -174,17 +174,28 @@ fn special_files_are_unavailable_without_opening_them() {
 }
 
 #[test]
-fn save_removes_only_matching_stale_regular_temp_siblings() {
+fn save_removes_only_old_matching_regular_temp_siblings() {
     let dir = tempdir().unwrap();
     let session_path = dir.path().join("session.json");
-    let stale = dir
+    let old = dir
         .path()
         .join(".session.json.00000000-0000-0000-0000-000000000001.tmp");
+    let fresh = dir
+        .path()
+        .join(".session.json.00000000-0000-0000-0000-000000000003.tmp");
     let matching_directory = dir
         .path()
         .join(".session.json.00000000-0000-0000-0000-000000000002.tmp");
     let unknown = dir.path().join(".session-other.tmp");
-    fs::write(&stale, b"stale").unwrap();
+    fs::write(&old, b"stale").unwrap();
+    fs::write(&fresh, b"live").unwrap();
+    filetime::set_file_mtime(
+        &old,
+        filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60),
+        ),
+    )
+    .unwrap();
     fs::create_dir(&matching_directory).unwrap();
     fs::write(&unknown, b"owned by someone else").unwrap();
 
@@ -196,7 +207,8 @@ fn save_removes_only_matching_stale_regular_temp_siblings() {
         })
         .unwrap();
 
-    assert!(!stale.exists());
+    assert!(!old.exists());
+    assert!(fresh.is_file());
     assert!(matching_directory.is_dir());
     assert!(unknown.is_file());
 }
@@ -341,6 +353,59 @@ fn concurrent_saves_leave_one_complete_snapshot() {
 
     let persisted: SessionSnapshot = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert!(snapshots.contains(&persisted));
+}
+
+#[test]
+fn independent_stores_do_not_delete_each_others_live_temp_files() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("session.json");
+    let first_store = SessionStore::new(&path);
+    let second_store = SessionStore::new(&path);
+    let first = SessionSnapshot {
+        version: 1,
+        tabs: vec![tab(
+            "first",
+            "/missing/first.parquet".into(),
+            "a".repeat(220 * 1024),
+        )],
+        active_tab_id: Some("first".into()),
+    };
+    let second = SessionSnapshot {
+        version: 1,
+        tabs: vec![tab(
+            "second",
+            "/missing/second.parquet".into(),
+            "b".repeat(220 * 1024),
+        )],
+        active_tab_id: Some("second".into()),
+    };
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let first_thread = {
+        let barrier = Arc::clone(&barrier);
+        let first = first.clone();
+        std::thread::spawn(move || {
+            for _ in 0..100 {
+                barrier.wait();
+                first_store.save(&first).unwrap();
+            }
+        })
+    };
+    let second_thread = {
+        let barrier = Arc::clone(&barrier);
+        let second = second.clone();
+        std::thread::spawn(move || {
+            for _ in 0..100 {
+                barrier.wait();
+                second_store.save(&second).unwrap();
+            }
+        })
+    };
+    first_thread.join().unwrap();
+    second_thread.join().unwrap();
+
+    let restored = SessionStore::new(path).load().unwrap();
+    assert_eq!(restored.warning, None);
+    assert!(restored.snapshot == first || restored.snapshot == second);
 }
 
 #[test]
