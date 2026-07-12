@@ -24,6 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 crossbeam-channel = "0.5"
 duckdb = { version = "=1.4.2", default-features = false, features = ["bundled", "parquet"] }
 sqlparser = { version = "0.59", features = ["visitor"] }
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

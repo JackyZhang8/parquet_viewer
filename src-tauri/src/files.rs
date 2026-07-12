@@ -15,10 +15,12 @@ use tauri::State;
 use uuid::Uuid;
 
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
 use crate::AppState;
 use crate::error::AppError;
@@ -152,7 +154,10 @@ struct LoadedFile {
 
 pub(crate) struct QuerySource {
     pub(crate) canonical_path: PathBuf,
+    pub(crate) duckdb_path: PathBuf,
     pub(crate) fingerprint_token: String,
+    file: File,
+    fingerprint: FileFingerprint,
 }
 
 impl FileRegistry {
@@ -243,7 +248,7 @@ impl FileRegistry {
             .get(file_id)
             .map(|entry| entry.fingerprint.clone())
             .ok_or_else(|| AppError::InvalidPath("Unknown file ID".into()))?;
-        let file = open_regular_file(&registered.canonical_path)?;
+        let file = open_query_guard(&registered.canonical_path)?;
         let current = fingerprint_from_open_file(&registered.canonical_path, &file)?;
         Ok(current != registered)
     }
@@ -263,11 +268,45 @@ impl FileRegistry {
                 "The file changed after it was opened; reload it before querying".into(),
             ));
         }
+        #[cfg(target_os = "macos")]
+        let duckdb_path = PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let duckdb_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+        let duckdb_path = registered.canonical_path.clone();
+        duckdb_path
+            .to_str()
+            .ok_or_else(|| AppError::InvalidPath("Query source path is not valid UTF-8".into()))?;
         Ok(QuerySource {
-            canonical_path: registered.canonical_path,
+            canonical_path: registered.canonical_path.clone(),
+            duckdb_path,
             fingerprint_token: format!("{}:{:?}", registered.size, registered.modified),
+            file,
+            fingerprint: registered,
         })
     }
+
+    pub(crate) fn revalidate_query_source(&self, source: &QuerySource) -> Result<(), AppError> {
+        let current = fingerprint_from_open_file(&source.canonical_path, &source.file)?;
+        if current != source.fingerprint {
+            return Err(AppError::StaleFile(
+                "The opened file changed before query execution".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn open_query_guard(path: &Path) -> Result<File, AppError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    #[cfg(windows)]
+    options.share_mode(1);
+    options
+        .open(path)
+        .map_err(|error| map_io_error(error, path))
 }
 
 #[tauri::command]

@@ -1,10 +1,11 @@
+mod admission;
 mod sql_policy;
 mod values;
 mod worker;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -20,6 +21,7 @@ use crate::filters::{BoundValue, compile_filter_query};
 use crate::models::{
     ColumnSchema, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted,
 };
+use admission::{Admission, AdmissionPermit};
 use sql_policy::validate_user_sql;
 use worker::worker_loop;
 
@@ -37,11 +39,11 @@ struct Cursor {
     batches: Receiver<BatchResult>,
     cancelled: Arc<AtomicBool>,
     interrupt: Arc<Mutex<Option<Arc<InterruptHandle>>>>,
+    _permit: Arc<AdmissionPermit>,
 }
 
 pub(super) struct QueryJob {
     query_id: String,
-    file_id: String,
     files: FileRegistry,
     source: QuerySource,
     execution_sql: String,
@@ -53,12 +55,23 @@ pub(super) struct QueryJob {
     ready: Sender<ReadyResult>,
     cancelled: Arc<AtomicBool>,
     interrupt: Arc<Mutex<Option<Arc<InterruptHandle>>>>,
+    _permit: Arc<AdmissionPermit>,
+    panic_for_test: bool,
+    counters: Arc<WorkerCounters>,
+}
+
+#[derive(Default)]
+pub(super) struct WorkerCounters {
+    queued: AtomicUsize,
+    running: AtomicUsize,
 }
 
 #[derive(Clone)]
 pub struct QueryService {
     cursors: Arc<Mutex<HashMap<String, Cursor>>>,
     jobs: Sender<QueryJob>,
+    admission: Arc<Admission>,
+    counters: Arc<WorkerCounters>,
 }
 
 impl Default for QueryService {
@@ -74,6 +87,8 @@ impl Default for QueryService {
         Self {
             cursors: Arc::new(Mutex::new(HashMap::new())),
             jobs,
+            admission: Arc::new(Admission::default()),
+            counters: Arc::new(WorkerCounters::default()),
         }
     }
 }
@@ -94,6 +109,7 @@ impl QueryService {
                 "Preview limit must be between 1 and 100000".into(),
             ));
         }
+        let permit = self.reserve_admission()?;
         let normalized_sql = validate_user_sql(&request.sql)?;
         let source = files.resolve_query_source(&request.file_id)?;
         let execution_sql = format!("SELECT * FROM ({normalized_sql}) AS __preview LIMIT ?");
@@ -109,6 +125,8 @@ impl QueryService {
             ))],
             schema_sql,
             Vec::new(),
+            false,
+            permit,
         )
     }
 
@@ -122,12 +140,13 @@ impl QueryService {
                 "Batch size must be between 1 and 5000".into(),
             ));
         }
+        let permit = self.reserve_admission()?;
         let source = files.resolve_query_source(&request.file_id)?;
         let metadata = files
             .get(&request.file_id)
             .ok_or_else(|| AppError::InvalidPath("Unknown file ID".into()))?;
         let path = source
-            .canonical_path
+            .duckdb_path
             .to_str()
             .ok_or_else(|| AppError::InvalidPath("File path is not valid UTF-8".into()))?;
         let compiled = compile_filter_query(path, &metadata.columns, &request.query)?;
@@ -144,6 +163,8 @@ impl QueryService {
             compiled.params.clone(),
             schema_sql,
             compiled.params,
+            false,
+            permit,
         )
     }
 
@@ -158,35 +179,40 @@ impl QueryService {
         execution_params: Vec<BoundValue>,
         schema_sql: String,
         schema_params: Vec<BoundValue>,
+        panic_for_test: bool,
+        permit: Arc<AdmissionPermit>,
     ) -> Result<QueryStarted, AppError> {
-        let replaced = self
-            .cursors
-            .lock()
-            .iter()
-            .filter(|(_, cursor)| cursor.file_id == file_id)
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for query_id in replaced {
-            let _ = self.cancel_query(&query_id);
-        }
-
         let query_id = Uuid::new_v4().to_string();
         let (batch_sender, batch_receiver) = bounded(BATCH_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = bounded(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let interrupt = Arc::new(Mutex::new(None));
-        self.cursors.lock().insert(
-            query_id.clone(),
-            Cursor {
-                file_id: file_id.clone(),
-                batches: batch_receiver,
-                cancelled: cancelled.clone(),
-                interrupt: interrupt.clone(),
-            },
-        );
+        let cursor = Cursor {
+            file_id: file_id.clone(),
+            batches: batch_receiver,
+            cancelled: cancelled.clone(),
+            interrupt: interrupt.clone(),
+            _permit: permit.clone(),
+        };
+        let displaced = {
+            let mut cursors = self.cursors.lock();
+            let replaced = cursors
+                .iter()
+                .filter(|(_, cursor)| cursor.file_id == file_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            let displaced = replaced
+                .into_iter()
+                .filter_map(|id| cursors.remove(&id))
+                .collect::<Vec<_>>();
+            cursors.insert(query_id.clone(), cursor);
+            displaced
+        };
+        for cursor in displaced {
+            cancel_cursor(cursor);
+        }
         let job = QueryJob {
             query_id: query_id.clone(),
-            file_id,
             files: files.clone(),
             source,
             execution_sql,
@@ -198,10 +224,24 @@ impl QueryService {
             ready: ready_sender,
             cancelled,
             interrupt,
+            _permit: permit,
+            panic_for_test,
+            counters: self.counters.clone(),
         };
-        if self.jobs.send(job).is_err() {
-            self.cursors.lock().remove(&query_id);
-            return Err(AppError::Internal("query worker pool stopped".into()));
+        self.counters.queued.fetch_add(1, Ordering::AcqRel);
+        if let Err(error) = self.jobs.try_send(job) {
+            self.counters.queued.fetch_sub(1, Ordering::AcqRel);
+            if let Some(cursor) = self.cursors.lock().remove(&query_id) {
+                cancel_cursor(cursor);
+            }
+            return match error {
+                crossbeam_channel::TrySendError::Full(_) => Err(AppError::ResourceExhausted(
+                    "The query queue is full".into(),
+                )),
+                crossbeam_channel::TrySendError::Disconnected(_) => {
+                    Err(AppError::Internal("query worker pool stopped".into()))
+                }
+            };
         }
         match ready_receiver.recv() {
             Ok(Ok(columns)) => Ok(QueryStarted { query_id, columns }),
@@ -239,10 +279,7 @@ impl QueryService {
             .lock()
             .remove(query_id)
             .ok_or_else(|| AppError::InvalidArgument("Unknown query ID".into()))?;
-        cursor.cancelled.store(true, Ordering::Release);
-        if let Some(interrupt) = cursor.interrupt.lock().as_ref() {
-            interrupt.interrupt();
-        }
+        cancel_cursor(cursor);
         Ok(())
     }
 
@@ -261,6 +298,61 @@ impl QueryService {
 
     pub fn active_cursor_count(&self) -> usize {
         self.cursors.lock().len()
+    }
+
+    fn reserve_admission(&self) -> Result<Arc<AdmissionPermit>, AppError> {
+        self.admission.try_acquire().ok_or_else(|| {
+            AppError::ResourceExhausted("Too many queries are already running or queued".into())
+        })
+    }
+
+    #[cfg(test)]
+    pub fn admitted_count_for_test(&self) -> usize {
+        self.admission.count()
+    }
+
+    #[cfg(test)]
+    pub fn queued_count_for_test(&self) -> usize {
+        self.counters.queued.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub fn running_count_for_test(&self) -> usize {
+        self.counters.running.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub fn wait_for_admitted_for_test(&self, expected: usize) {
+        self.admission.wait_for(expected);
+    }
+
+    #[cfg(test)]
+    pub fn start_injected_panic_for_test(
+        &self,
+        file_id: String,
+        files: &FileRegistry,
+    ) -> Result<QueryStarted, AppError> {
+        let source = files.resolve_query_source(&file_id)?;
+        let permit = self.reserve_admission()?;
+        self.enqueue_query(
+            file_id,
+            1,
+            files,
+            source,
+            "SELECT * FROM data".into(),
+            Vec::new(),
+            "SELECT * FROM data LIMIT 0".into(),
+            Vec::new(),
+            true,
+            permit,
+        )
+    }
+}
+
+fn cancel_cursor(cursor: Cursor) {
+    cursor.cancelled.store(true, Ordering::Release);
+    if let Some(interrupt) = cursor.interrupt.lock().as_ref() {
+        interrupt.interrupt();
     }
 }
 

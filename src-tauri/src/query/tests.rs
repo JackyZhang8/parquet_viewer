@@ -81,6 +81,13 @@ fn cte_cannot_smuggle_an_external_table() {
     );
 }
 
+#[test]
+fn nested_cte_alias_does_not_leak_to_outer_query_scope() {
+    assert!(validate_user_sql(
+        "SELECT * FROM (WITH leaked AS (SELECT * FROM data) SELECT * FROM leaked) nested JOIN leaked ON true"
+    ).is_err());
+}
+
 fn registered_fixture(rows: u32) -> (TempDir, FileRegistry, String) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rows.parquet");
@@ -198,7 +205,7 @@ fn converts_integer_extremes_decimal_blob_date_and_null_without_precision_loss()
         CellValue::String("date-days:1".into())
     );
     let blob = cell_from_value(Value::Blob(vec![0, 0xff, 0x10]));
-    assert_eq!(serde_json::to_value(blob).unwrap()["value"], "00ff10");
+    assert_eq!(serde_json::to_value(blob).unwrap()["value"], "AP8Q");
 }
 
 #[test]
@@ -234,7 +241,7 @@ fn cancel_removes_cursor_and_later_fetch_is_unknown() {
     let started = service
         .start_query(
             request(
-                file_id,
+                file_id.clone(),
                 "SELECT count(*) FROM data a CROSS JOIN data b CROSS JOIN data c",
                 1,
                 100,
@@ -634,4 +641,231 @@ fn third_query_queues_on_fixed_pool_and_close_cancels_it() {
     service.cancel_query(&second.query_id).unwrap();
     assert!(queued.join().unwrap().is_err());
     assert_eq!(service.active_cursor_count(), 0);
+}
+
+#[test]
+fn admission_rejects_fifth_outstanding_query_without_publishing_cursor() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = FileRegistry::default();
+    let files = (0..5)
+        .map(|index| add_fixture(&directory, &registry, &format!("{index}.parquet"), 20))
+        .collect::<Vec<_>>();
+    let service = QueryService::default();
+    let first = service
+        .start_query(
+            request(files[0].clone(), "SELECT * FROM data", 1, 20),
+            &registry,
+        )
+        .unwrap();
+    let second = service
+        .start_query(
+            request(files[1].clone(), "SELECT * FROM data", 1, 20),
+            &registry,
+        )
+        .unwrap();
+    let queued = files[2..4]
+        .iter()
+        .map(|file_id| {
+            let file_id = file_id.clone();
+            let service = service.clone();
+            let registry = registry.clone();
+            std::thread::spawn(move || {
+                service.start_query(request(file_id, "SELECT * FROM data", 1, 20), &registry)
+            })
+        })
+        .collect::<Vec<_>>();
+    service.wait_for_admitted_for_test(4);
+    assert_eq!(service.admitted_count_for_test(), 4);
+    assert!(service.running_count_for_test() <= 2);
+    assert!(service.queued_count_for_test() <= 2);
+    assert!(matches!(
+        service.start_query(
+            request(files[4].clone(), "SELECT * FROM data", 1, 20),
+            &registry
+        ),
+        Err(crate::error::AppError::ResourceExhausted(_))
+    ));
+    assert!(service.active_cursor_count() <= 4);
+    service.cancel_query(&first.query_id).unwrap();
+    service.cancel_query(&second.query_id).unwrap();
+    for handle in queued {
+        let started = handle.join().unwrap().unwrap();
+        service.cancel_query(&started.query_id).unwrap();
+    }
+    service.wait_for_admitted_for_test(0);
+}
+
+#[test]
+fn simultaneous_same_file_starts_publish_exactly_one_current_cursor() {
+    let (_directory, registry, file_id) = registered_fixture(20);
+    let service = QueryService::default();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let starts = (0..2)
+        .map(|_| {
+            let service = service.clone();
+            let registry = registry.clone();
+            let file_id = file_id.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                service.start_query(request(file_id, "SELECT * FROM data", 1, 20), &registry)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = starts
+        .into_iter()
+        .map(|start| start.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(service.active_cursor_count(), 1);
+    assert!(service.admitted_count_for_test() <= 2);
+    assert!(results.iter().any(Result::is_ok));
+    for started in results.into_iter().flatten() {
+        let _ = service.cancel_query(&started.query_id);
+    }
+    service.wait_for_admitted_for_test(0);
+}
+
+#[test]
+fn resource_limits_reject_wide_schema_and_oversized_cells_with_cleanup() {
+    let (_directory, registry, file_id) = registered_fixture(10);
+    let service = QueryService::default();
+    let projection = (0..513)
+        .map(|index| format!("{index} AS c{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(matches!(
+        service.start_query(
+            request(file_id.clone(), &format!("SELECT {projection}"), 1, 1),
+            &registry
+        ),
+        Err(crate::error::AppError::ResourceExhausted(_))
+    ));
+    assert_eq!(service.active_cursor_count(), 0);
+
+    let started = service
+        .start_query(
+            request(
+                file_id.clone(),
+                "SELECT repeat('x', 1048577) AS huge FROM data",
+                1,
+                1,
+            ),
+            &registry,
+        )
+        .unwrap();
+    assert!(matches!(
+        service.fetch_query_batch(&started.query_id),
+        Err(crate::error::AppError::ResourceExhausted(_))
+    ));
+    assert_eq!(service.active_cursor_count(), 0);
+
+    let started = service
+        .start_query(
+            request(
+                file_id.clone(),
+                "SELECT from_hex(repeat('aa', 800000)) AS huge_blob FROM data",
+                1,
+                1,
+            ),
+            &registry,
+        )
+        .unwrap();
+    assert!(matches!(
+        service.fetch_query_batch(&started.query_id),
+        Err(crate::error::AppError::ResourceExhausted(_))
+    ));
+
+    let started = service
+        .start_query(
+            request(
+                file_id,
+                "SELECT repeat('x', 900000) AS payload FROM data",
+                20,
+                10,
+            ),
+            &registry,
+        )
+        .unwrap();
+    let first = service.fetch_query_batch(&started.query_id).unwrap();
+    let second = service.fetch_query_batch(&started.query_id).unwrap();
+    assert!(!first.done && second.done);
+    assert_eq!(first.rows.len() + second.rows.len(), 10);
+}
+
+#[test]
+fn injected_worker_panic_releases_admission_and_worker_survives() {
+    let (_directory, registry, file_id) = registered_fixture(2);
+    let service = QueryService::default();
+    assert!(
+        service
+            .start_injected_panic_for_test(file_id.clone(), &registry)
+            .is_err()
+    );
+    service.wait_for_admitted_for_test(0);
+    let started = service
+        .start_query(request(file_id, "SELECT * FROM data", 2, 2), &registry)
+        .unwrap();
+    while !service.fetch_query_batch(&started.query_id).unwrap().done {}
+}
+
+#[test]
+fn nested_parquet_values_are_structured_cells_in_service_batches() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nested-query.parquet");
+    let quoted = path.to_string_lossy().replace('\'', "''");
+    Connection::open_in_memory()
+        .unwrap()
+        .execute_batch(&format!(
+            "COPY (SELECT [1, NULL, 3]::INTEGER[] AS items, {{'name': 'Ada', 'active': true}} AS profile, map(['score'], [42]) AS attributes) TO '{quoted}' (FORMAT PARQUET)"
+        ))
+        .unwrap();
+    let registry = FileRegistry::default();
+    let file_id = registry.open_paths(vec![path]).remove(0).unwrap().file_id;
+    let service = QueryService::default();
+    let started = service
+        .start_query(request(file_id, "SELECT * FROM data", 1, 1), &registry)
+        .unwrap();
+    let batch = service.fetch_query_batch(&started.query_id).unwrap();
+    assert!(matches!(batch.rows[0][0], CellValue::Array(_)));
+    assert!(matches!(batch.rows[0][1], CellValue::Object(_)));
+    assert!(matches!(batch.rows[0][2], CellValue::Array(_)));
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_fd_source_survives_replacement_of_original_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("guarded.parquet");
+    let connection = Connection::open_in_memory().unwrap();
+    let quoted = path.to_string_lossy().replace('\'', "''");
+    connection
+        .execute_batch(&format!(
+            "COPY (SELECT 1 AS id) TO '{quoted}' (FORMAT PARQUET)"
+        ))
+        .unwrap();
+    let registry = FileRegistry::default();
+    let file_id = registry
+        .open_paths(vec![path.clone()])
+        .remove(0)
+        .unwrap()
+        .file_id;
+    let source = registry.resolve_query_source(&file_id).unwrap();
+    let replacement = directory.path().join("replacement.parquet");
+    let quoted_replacement = replacement.to_string_lossy().replace('\'', "''");
+    connection
+        .execute_batch(&format!(
+            "COPY (SELECT 2 AS id) TO '{quoted_replacement}' (FORMAT PARQUET)"
+        ))
+        .unwrap();
+    std::fs::rename(replacement, path).unwrap();
+    let guarded = source.duckdb_path.to_str().unwrap().replace('\'', "''");
+    let id: i64 = connection
+        .query_row(
+            &format!("SELECT id FROM read_parquet('{guarded}')"),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(id, 1);
 }

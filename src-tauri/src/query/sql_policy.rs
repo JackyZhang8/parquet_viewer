@@ -61,7 +61,7 @@ pub(super) fn validate_user_sql(sql: &str) -> Result<String, AppError> {
 
 #[derive(Default)]
 struct PolicyVisitor {
-    ctes: HashSet<String>,
+    cte_scopes: Vec<HashSet<String>>,
 }
 
 impl Visitor for PolicyVisitor {
@@ -83,12 +83,20 @@ impl Visitor for PolicyVisitor {
             return ControlFlow::Break("OFFSET is not allowed in preview queries".into());
         }
         if let Some(with) = &query.with {
-            self.ctes.extend(
+            self.cte_scopes.push(
                 with.cte_tables
                     .iter()
-                    .map(|cte| cte.alias.name.value.to_ascii_lowercase()),
+                    .map(|cte| cte.alias.name.value.to_ascii_lowercase())
+                    .collect(),
             );
+        } else {
+            self.cte_scopes.push(HashSet::new());
         }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
+        self.cte_scopes.pop();
         ControlFlow::Continue(())
     }
 
@@ -99,7 +107,13 @@ impl Visitor for PolicyVisitor {
             );
         };
         let name = name.to_ascii_lowercase();
-        if name == "data" || self.ctes.contains(&name) {
+        if name == "data"
+            || self
+                .cte_scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.contains(&name))
+        {
             ControlFlow::Continue(())
         } else {
             ControlFlow::Break("The query may only read from data or a CTE".into())
