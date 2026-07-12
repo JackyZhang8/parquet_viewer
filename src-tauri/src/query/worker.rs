@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, TryRecvError};
 use duckdb::types::Value;
 use duckdb::{Config, Connection};
 
-use super::values::cell_from_array;
+use super::values::{cell_from_array, json_encoded_len};
 use super::{QueryJob, WorkerCounters};
 use crate::error::AppError;
 use crate::files::QuerySource;
@@ -20,15 +20,80 @@ const MAX_RESULT_COLUMNS: usize = 512;
 const MAX_BATCH_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) fn worker_loop(jobs: Receiver<QueryJob>, replacements: Receiver<QueryJob>) {
+    let mut prefer_replacement = true;
     loop {
-        let job = crossbeam_channel::select_biased! {
-            recv(replacements) -> job => match job { Ok(job) => job, Err(_) => break },
-            recv(jobs) -> job => match job { Ok(job) => job, Err(_) => break },
+        let Some(job) = receive_fair(&jobs, &replacements, &mut prefer_replacement) else {
+            break;
         };
         job.counters.queued.fetch_sub(1, Ordering::AcqRel);
         job.counters.running.fetch_add(1, Ordering::AcqRel);
         let _running = RunningGuard(job.counters.clone());
         run_job(job);
+    }
+}
+
+fn receive_fair<T>(
+    normal: &Receiver<T>,
+    replacements: &Receiver<T>,
+    prefer_replacement: &mut bool,
+) -> Option<T> {
+    let (normal_disconnected, replacements_disconnected) = if *prefer_replacement {
+        let replacements_disconnected = match replacements.try_recv() {
+            Ok(value) => {
+                *prefer_replacement = false;
+                return Some(value);
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => true,
+        };
+        let normal_disconnected = match normal.try_recv() {
+            Ok(value) => {
+                *prefer_replacement = true;
+                return Some(value);
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => true,
+        };
+        (normal_disconnected, replacements_disconnected)
+    } else {
+        let normal_disconnected = match normal.try_recv() {
+            Ok(value) => {
+                *prefer_replacement = true;
+                return Some(value);
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => true,
+        };
+        let replacements_disconnected = match replacements.try_recv() {
+            Ok(value) => {
+                *prefer_replacement = false;
+                return Some(value);
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => true,
+        };
+        (normal_disconnected, replacements_disconnected)
+    };
+    if normal_disconnected && replacements_disconnected {
+        return None;
+    }
+    if normal_disconnected {
+        return replacements.recv().ok().inspect(|_| {
+            *prefer_replacement = false;
+        });
+    }
+    if replacements_disconnected {
+        return normal.recv().ok().inspect(|_| {
+            *prefer_replacement = true;
+        });
+    }
+    crossbeam_channel::select! {
+        recv(normal) -> value => value.ok().inspect(|_| {
+            *prefer_replacement = true;
+        }),
+        recv(replacements) -> value => value.ok().inspect(|_| {
+            *prefer_replacement = false;
+        }),
     }
 }
 
@@ -128,7 +193,10 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
 
     let mut returned_rows = 0_u64;
     let mut batch = Vec::with_capacity(job.batch_size);
-    let mut batch_bytes = 0_usize;
+    let max_rows_bytes = MAX_BATCH_ENCODED_BYTES
+        .checked_sub(batch_payload_overhead(&job.query_id)?)
+        .ok_or_else(batch_resource_exhausted)?;
+    let mut batch_rows_bytes = 2_usize;
     let stream = statement
         .stream_arrow(duckdb::params_from_iter(execution_values.iter()), schema)
         .map_err(safe_sql_error)?;
@@ -141,34 +209,28 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
                 return Err(AppError::Cancelled("The query was cancelled".into()));
             }
             let mut converted = Vec::with_capacity(record_batch.num_columns());
-            let mut row_bytes = 2_usize;
             for column in record_batch.columns() {
                 let cell = cell_from_array(column.as_ref(), row)?;
-                row_bytes = row_bytes
-                    .checked_add(cell.encoded_bytes + 1)
-                    .filter(|size| *size <= MAX_BATCH_ENCODED_BYTES)
-                    .ok_or_else(|| {
-                        AppError::ResourceExhausted(
-                            "A query row exceeds the batch memory limit".into(),
-                        )
-                    })?;
-                converted.push(cell);
+                converted.push(cell.value);
             }
-            if !batch.is_empty() && batch_bytes + row_bytes > MAX_BATCH_ENCODED_BYTES {
+            let row_bytes = json_encoded_len(&converted, max_rows_bytes)?;
+            let separator_bytes = usize::from(!batch.is_empty());
+            let candidate_bytes = batch_rows_bytes
+                .checked_add(row_bytes + separator_bytes)
+                .ok_or_else(batch_resource_exhausted)?;
+            if !batch.is_empty() && candidate_bytes > max_rows_bytes {
                 send_batch(job, &mut batch, false, returned_rows, started)?;
-                batch_bytes = 0;
+                batch_rows_bytes = 2;
             }
-            batch.push(
-                converted
-                    .into_iter()
-                    .map(|cell| cell.value)
-                    .collect::<Vec<CellValue>>(),
-            );
-            batch_bytes += row_bytes;
+            batch_rows_bytes = batch_rows_bytes
+                .checked_add(row_bytes + usize::from(!batch.is_empty()))
+                .filter(|size| *size <= max_rows_bytes)
+                .ok_or_else(batch_resource_exhausted)?;
+            batch.push(converted);
             returned_rows += 1;
             if batch.len() == job.batch_size {
                 send_batch(job, &mut batch, false, returned_rows, started)?;
-                batch_bytes = 0;
+                batch_rows_bytes = 2;
             }
         }
     }
@@ -199,9 +261,27 @@ fn send_batch(
         returned_rows,
         elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
     };
+    json_encoded_len(&payload, MAX_BATCH_ENCODED_BYTES)?;
     job.batches
         .send(Ok(payload))
         .map_err(|_| AppError::Cancelled("The query was cancelled".into()))
+}
+
+fn batch_payload_overhead(query_id: &str) -> Result<usize, AppError> {
+    let payload = QueryBatch {
+        query_id: query_id.into(),
+        rows: Vec::new(),
+        done: false,
+        returned_rows: u64::MAX,
+        elapsed_ms: u64::MAX,
+    };
+    json_encoded_len(&payload, MAX_BATCH_ENCODED_BYTES)?
+        .checked_sub(2)
+        .ok_or_else(batch_resource_exhausted)
+}
+
+fn batch_resource_exhausted() -> AppError {
+    AppError::ResourceExhausted("A query batch exceeds the configured memory limit".into())
 }
 
 fn open_configured_connection(query_id: &str) -> Result<Connection, AppError> {
@@ -274,7 +354,28 @@ fn internal_duckdb(error: duckdb::Error) -> AppError {
 mod tests {
     use std::fs;
 
-    use super::{open_configured_connection, restrict_external_access};
+    use crossbeam_channel::bounded;
+
+    use super::{open_configured_connection, receive_fair, restrict_external_access};
+
+    #[test]
+    fn ready_normal_job_runs_after_at_most_one_replacement() {
+        let (normal_tx, normal_rx) = bounded(2);
+        let (replacement_tx, replacement_rx) = bounded(3);
+        normal_tx.send("normal").unwrap();
+        replacement_tx.send("replacement-1").unwrap();
+        replacement_tx.send("replacement-2").unwrap();
+        let mut prefer_replacement = true;
+
+        assert_eq!(
+            receive_fair(&normal_rx, &replacement_rx, &mut prefer_replacement),
+            Some("replacement-1")
+        );
+        assert_eq!(
+            receive_fair(&normal_rx, &replacement_rx, &mut prefer_replacement),
+            Some("normal")
+        );
+    }
 
     #[test]
     fn config_sets_temp_limit_and_external_access_can_be_disabled() {

@@ -185,6 +185,24 @@ fn validates_batch_and_preview_bounds_before_starting() {
 }
 
 #[test]
+fn raw_sql_length_is_bounded_before_query_admission() {
+    const MAX_SQL_BYTES: usize = 256 * 1024;
+    let (_directory, registry, file_id) = registered_fixture(1);
+    let service = QueryService::default();
+    let exact = format!("SELECT 1{}", " ".repeat(MAX_SQL_BYTES - "SELECT 1".len()));
+    let started = service
+        .start_query(request(file_id.clone(), &exact, 1, 1), &registry)
+        .unwrap();
+    while !service.fetch_query_batch(&started.query_id).unwrap().done {}
+    let over = format!("{exact} ");
+    assert!(matches!(
+        service.start_query(request(file_id, &over, 1, 1), &registry),
+        Err(crate::error::AppError::InvalidArgument(_))
+    ));
+    service.wait_for_admitted_for_test(0);
+}
+
+#[test]
 fn converts_integer_extremes_decimal_blob_date_and_null_without_precision_loss() {
     use super::values::cell_from_value;
     assert_eq!(
@@ -273,6 +291,84 @@ fn new_query_replaces_previous_query_for_file() {
     assert!(service.fetch_query_batch(&first.query_id).is_err());
     assert_eq!(service.active_cursor_count(), 1);
     service.cancel_query(&second.query_id).unwrap();
+}
+
+#[test]
+fn rejected_replacement_leaves_existing_cursor_usable() {
+    let (_directory, registry, file_id) = registered_fixture(20);
+    let service = QueryService::default();
+    let first = service
+        .start_query(
+            request(file_id.clone(), "SELECT * FROM data", 1, 100),
+            &registry,
+        )
+        .unwrap();
+    let _replacement_guard = service.hold_replacement_gate_for_test();
+
+    assert!(matches!(
+        service.start_query(request(file_id, "SELECT id FROM data", 2, 100), &registry,),
+        Err(crate::error::AppError::ResourceExhausted(_))
+    ));
+    assert_eq!(service.active_cursor_count(), 1);
+    assert!(service.fetch_query_batch(&first.query_id).is_ok());
+    service.cancel_query(&first.query_id).unwrap();
+}
+
+#[test]
+fn escaped_cell_is_rejected_by_serialized_json_size() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("escaped.parquet");
+    let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+    let value = "\n".repeat(600_000);
+    assert!(value.len() < super::values::MAX_CELL_ENCODED_BYTES);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(vec![value]))],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let registry = FileRegistry::default();
+    let file_id = registry.open_paths(vec![path]).remove(0).unwrap().file_id;
+    let service = QueryService::default();
+    let started = service
+        .start_query(request(file_id, "SELECT * FROM data", 1, 1), &registry)
+        .unwrap();
+
+    assert!(matches!(
+        service.fetch_query_batch(&started.query_id),
+        Err(crate::error::AppError::ResourceExhausted(_))
+    ));
+    service.wait_for_admitted_for_test(0);
+}
+
+#[test]
+fn batches_include_json_envelope_in_encoded_size_limit() {
+    const MAX_BATCH_ENCODED_BYTES: usize = 8 * 1024 * 1024;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("large-batch.parquet");
+    let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+    let value = "x".repeat(super::values::MAX_CELL_ENCODED_BYTES - 2);
+    let values = vec![value.as_str(); 8];
+    let batch =
+        RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(values))]).unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let registry = FileRegistry::default();
+    let file_id = registry.open_paths(vec![path]).remove(0).unwrap().file_id;
+    let service = QueryService::default();
+    let started = service
+        .start_query(request(file_id, "SELECT * FROM data", 8, 8), &registry)
+        .unwrap();
+
+    let first = service.fetch_query_batch(&started.query_id).unwrap();
+    assert!(!first.done);
+    assert!(first.rows.len() < 8);
+    assert!(serde_json::to_vec(&first).unwrap().len() <= MAX_BATCH_ENCODED_BYTES);
+    let second = service.fetch_query_batch(&started.query_id).unwrap();
+    assert!(serde_json::to_vec(&second).unwrap().len() <= MAX_BATCH_ENCODED_BYTES);
 }
 
 #[test]

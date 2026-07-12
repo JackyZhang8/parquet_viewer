@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -234,9 +235,8 @@ fn blob_cell(bytes: &[u8]) -> Result<ConvertedCell, AppError> {
 }
 
 fn converted(value: CellValue, encoded_bytes: usize) -> Result<ConvertedCell, AppError> {
-    if encoded_bytes > MAX_CELL_ENCODED_BYTES {
-        return Err(resource_exhausted());
-    }
+    let _ = encoded_bytes;
+    let encoded_bytes = json_encoded_len(&value, MAX_CELL_ENCODED_BYTES)?;
     Ok(ConvertedCell {
         value,
         encoded_bytes,
@@ -245,10 +245,39 @@ fn converted(value: CellValue, encoded_bytes: usize) -> Result<ConvertedCell, Ap
 
 fn checked_add(left: usize, right: usize) -> Result<usize, AppError> {
     let size = left.checked_add(right).ok_or_else(resource_exhausted)?;
-    if size > MAX_CELL_ENCODED_BYTES {
-        return Err(resource_exhausted());
-    }
     Ok(size)
+}
+
+pub(super) fn json_encoded_len<T: serde::Serialize>(
+    value: &T,
+    limit: usize,
+) -> Result<usize, AppError> {
+    let mut writer = CountingWriter { count: 0, limit };
+    serde_json::to_writer(&mut writer, value).map_err(|_| resource_exhausted())?;
+    Ok(writer.count)
+}
+
+struct CountingWriter {
+    count: usize,
+    limit: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next = self
+            .count
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("encoded value too large"))?;
+        if next > self.limit {
+            return Err(io::Error::other("encoded value too large"));
+        }
+        self.count = next;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn resource_exhausted() -> AppError {

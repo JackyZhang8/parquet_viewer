@@ -27,6 +27,7 @@ use worker::worker_loop;
 
 const MAX_BATCH_SIZE: u32 = 5_000;
 const MAX_PREVIEW_LIMIT: u32 = 100_000;
+const MAX_SQL_BYTES: usize = 256 * 1024;
 const WORKER_COUNT: usize = 2;
 const JOB_QUEUE_CAPACITY: usize = 2;
 const REPLACEMENT_QUEUE_CAPACITY: usize = 1;
@@ -70,6 +71,7 @@ pub(super) struct WorkerCounters {
 #[derive(Clone)]
 pub struct QueryService {
     cursors: Arc<Mutex<HashMap<String, Cursor>>>,
+    replacement_gate: Arc<Mutex<()>>,
     jobs: Sender<QueryJob>,
     replacement_jobs: Sender<QueryJob>,
     admission: Arc<Admission>,
@@ -91,6 +93,7 @@ impl Default for QueryService {
         }
         Self {
             cursors: Arc::new(Mutex::new(HashMap::new())),
+            replacement_gate: Arc::new(Mutex::new(())),
             jobs,
             replacement_jobs,
             admission: Arc::new(Admission::default()),
@@ -113,6 +116,11 @@ impl QueryService {
         if !(1..=MAX_PREVIEW_LIMIT).contains(&request.preview_limit) {
             return Err(AppError::InvalidArgument(
                 "Preview limit must be between 1 and 100000".into(),
+            ));
+        }
+        if request.sql.len() > MAX_SQL_BYTES {
+            return Err(AppError::InvalidArgument(
+                "SQL must not exceed 262144 UTF-8 bytes".into(),
             ));
         }
         let normalized_sql = validate_user_sql(&request.sql)?;
@@ -188,39 +196,53 @@ impl QueryService {
         let (ready_sender, ready_receiver) = bounded(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let interrupt = Arc::new(Mutex::new(None));
-        let (displaced, permit) = {
-            let mut cursors = self.cursors.lock();
-            let replaced = cursors
+        let replacement = {
+            let cursors = self.cursors.lock();
+            cursors
                 .iter()
-                .filter(|(_, cursor)| cursor.file_id == file_id)
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>();
-            let displaced = replaced
-                .into_iter()
-                .filter_map(|id| cursors.remove(&id))
-                .collect::<Vec<_>>();
-            let permit = if let Some(cursor) = displaced.first() {
-                cursor._permit.clone()
-            } else {
-                self.admission.try_acquire().ok_or_else(|| {
-                    AppError::ResourceExhausted(
-                        "Too many queries are already running or queued".into(),
-                    )
-                })?
-            };
-            let cursor = Cursor {
-                file_id: file_id.clone(),
-                batches: batch_receiver,
-                cancelled: cancelled.clone(),
-                interrupt: interrupt.clone(),
-                _permit: permit.clone(),
-            };
-            cursors.insert(query_id.clone(), cursor);
-            (displaced, permit)
+                .find(|(_, cursor)| cursor.file_id == file_id)
+                .map(|(id, cursor)| (id.clone(), cursor._permit.clone()))
         };
-        let is_replacement = !displaced.is_empty();
-        for cursor in displaced {
-            cancel_cursor(cursor);
+        let _replacement_guard = if replacement.is_some() {
+            Some(self.replacement_gate.try_lock().ok_or_else(|| {
+                AppError::ResourceExhausted("The replacement query queue is busy".into())
+            })?)
+        } else {
+            None
+        };
+        let replacement = if let Some((expected_id, _)) = replacement {
+            let cursors = self.cursors.lock();
+            cursors
+                .get(&expected_id)
+                .filter(|cursor| cursor.file_id == file_id)
+                .map(|cursor| (expected_id, cursor._permit.clone()))
+        } else {
+            None
+        };
+        let permit = if let Some((_, permit)) = &replacement {
+            permit.clone()
+        } else {
+            self.admission.try_acquire().ok_or_else(|| {
+                AppError::ResourceExhausted("Too many queries are already running or queued".into())
+            })?
+        };
+        if replacement.is_none() {
+            let mut cursors = self.cursors.lock();
+            if cursors.values().any(|cursor| cursor.file_id == file_id) {
+                return Err(AppError::ResourceExhausted(
+                    "A replacement query is already being admitted".into(),
+                ));
+            }
+            cursors.insert(
+                query_id.clone(),
+                Cursor {
+                    file_id: file_id.clone(),
+                    batches: batch_receiver.clone(),
+                    cancelled: cancelled.clone(),
+                    interrupt: interrupt.clone(),
+                    _permit: permit.clone(),
+                },
+            );
         }
         let job = QueryJob {
             query_id: query_id.clone(),
@@ -233,14 +255,14 @@ impl QueryService {
             batch_size: batch_size as usize,
             batches: batch_sender,
             ready: ready_sender,
-            cancelled,
-            interrupt,
-            _permit: permit,
+            cancelled: cancelled.clone(),
+            interrupt: interrupt.clone(),
+            _permit: permit.clone(),
             panic_for_test,
             counters: self.counters.clone(),
         };
         self.counters.queued.fetch_add(1, Ordering::AcqRel);
-        let sender = if is_replacement {
+        let sender = if replacement.is_some() {
             &self.replacement_jobs
         } else {
             &self.jobs
@@ -258,6 +280,30 @@ impl QueryService {
                     Err(AppError::Internal("query worker pool stopped".into()))
                 }
             };
+        }
+        if let Some((expected_id, _)) = replacement {
+            let displaced = {
+                let mut cursors = self.cursors.lock();
+                if !matches!(cursors.get(&expected_id), Some(cursor) if cursor.file_id == file_id) {
+                    cancelled.store(true, Ordering::Release);
+                    return Err(AppError::ResourceExhausted(
+                        "The query being replaced is no longer current".into(),
+                    ));
+                }
+                let displaced = cursors.remove(&expected_id).expect("cursor was checked");
+                cursors.insert(
+                    query_id.clone(),
+                    Cursor {
+                        file_id,
+                        batches: batch_receiver,
+                        cancelled: cancelled.clone(),
+                        interrupt: interrupt.clone(),
+                        _permit: permit,
+                    },
+                );
+                displaced
+            };
+            cancel_cursor(displaced);
         }
         match ready_receiver.recv() {
             Ok(Ok(columns)) => Ok(QueryStarted { query_id, columns }),
@@ -334,6 +380,11 @@ impl QueryService {
     #[cfg(test)]
     pub fn wait_for_admitted_for_test(&self, expected: usize) {
         self.admission.wait_for(expected);
+    }
+
+    #[cfg(test)]
+    pub fn hold_replacement_gate_for_test(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.replacement_gate.lock()
     }
 
     #[cfg(test)]
