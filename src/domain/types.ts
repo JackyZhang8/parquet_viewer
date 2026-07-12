@@ -95,7 +95,12 @@ export type SessionFilterOperator =
   | 'isNull'
   | 'isNotNull'
 
-export type SessionScalar = null | boolean | number | string
+export type SessionScalar =
+  | { type: 'null' }
+  | { type: 'boolean'; value: boolean }
+  | { type: 'number'; value: number }
+  | { type: 'integer'; value: string }
+  | { type: 'string'; value: string }
 
 export interface SessionSort {
   column: string
