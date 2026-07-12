@@ -198,4 +198,63 @@ describe('workspace store', () => {
     expect(store.getState().tabs[0]).toMatchObject({ id: 'saved', status: 'ready', sqlDraft: 'draft', fileId: 'new' })
     expect(store.getState().tabs[0].error).toBeUndefined()
   })
+
+  const duplicateRestore = (activeTabId: string) => ({
+    snapshot: { version: 1, activeTabId, tabs: [
+      { id: 'first', fileId: 'old-1', path: '/alias-one.parquet', sqlDraft: 'first draft', filters: [], sorts: [], viewState: { scrollTop: 1, scrollLeft: 0, sidebarWidth: 200, editorHeight: 100 } },
+      { id: 'second', fileId: 'old-2', path: '/alias-two.parquet', sqlDraft: 'second draft', filters: [], sorts: [], viewState: { scrollTop: 2, scrollLeft: 0, sidebarWidth: 210, editorHeight: 110 } },
+    ] }, unavailableTabIds: [], warning: null,
+  } satisfies RestoredSession)
+
+  it('deduplicates restored aliases by canonical file id and prefers the active tab state', async () => {
+    const reopening = deferred<OpenFileOutcome[]>()
+    const desktop = api({ loadSession: vi.fn(async () => duplicateRestore('second')), openFiles: vi.fn(() => reopening.promise) })
+    const store = createWorkspaceStore(desktop)
+    const hydration = store.getState().hydrate()
+    await vi.waitFor(() => expect(store.getState().tabs).toHaveLength(2))
+    reopening.resolve([
+      { ok: true, metadata: metadata('shared', '/canonical.parquet') },
+      { ok: true, metadata: metadata('shared', '/canonical.parquet') },
+    ])
+    await hydration
+    expect(store.getState().tabs).toHaveLength(1)
+    expect(store.getState().tabs[0]).toMatchObject({ id: 'second', fileId: 'shared', sqlDraft: 'second draft' })
+    expect(store.getState().activeTabId).toBe('second')
+    expect(desktop.closeFile).not.toHaveBeenCalled()
+  })
+
+  it('keeps a shared restored handle when one alias closes during reopen', async () => {
+    const reopening = deferred<OpenFileOutcome[]>()
+    const desktop = api({ loadSession: vi.fn(async () => duplicateRestore('first')), openFiles: vi.fn(() => reopening.promise) })
+    const store = createWorkspaceStore(desktop)
+    const hydration = store.getState().hydrate()
+    await vi.waitFor(() => expect(store.getState().tabs).toHaveLength(2))
+    await store.getState().closeTab('first')
+    reopening.resolve([
+      { ok: true, metadata: metadata('shared', '/canonical.parquet') },
+      { ok: true, metadata: metadata('shared', '/canonical.parquet') },
+    ])
+    await hydration
+    expect(store.getState().tabs).toHaveLength(1)
+    expect(store.getState().tabs[0]).toMatchObject({ id: 'second', fileId: 'shared', status: 'ready' })
+    expect(desktop.closeFile).not.toHaveBeenCalled()
+  })
+
+  it('closes a shared reopened handle once when all restored owners close', async () => {
+    const reopening = deferred<OpenFileOutcome[]>()
+    const desktop = api({ loadSession: vi.fn(async () => duplicateRestore('first')), openFiles: vi.fn(() => reopening.promise) })
+    const store = createWorkspaceStore(desktop)
+    const hydration = store.getState().hydrate()
+    await vi.waitFor(() => expect(store.getState().tabs).toHaveLength(2))
+    await store.getState().closeTab('first')
+    await store.getState().closeTab('second')
+    reopening.resolve([
+      { ok: true, metadata: metadata('shared', '/canonical.parquet') },
+      { ok: true, metadata: metadata('shared', '/canonical.parquet') },
+    ])
+    await hydration
+    expect(store.getState().tabs).toHaveLength(0)
+    expect(desktop.closeFile).toHaveBeenCalledTimes(1)
+    expect(desktop.closeFile).toHaveBeenCalledWith('shared')
+  })
 })

@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
 import type { WorkspaceTab } from '../../stores/workspace'
@@ -73,4 +73,38 @@ it('reports rejected context actions without an unhandled promise', async () => 
   await user.pointer({ keys: '[MouseRight]', target: local.getByRole('tab') })
   await user.click(local.getByRole('menuitem', { name: /reveal/i }))
   await vi.waitFor(() => expect(onError).toHaveBeenCalledWith('Reveal file', expect.any(Error)))
+})
+
+it('opens and navigates the context menu entirely by keyboard and restores tab focus', async () => {
+  const user = userEvent.setup()
+  const view = render(<FileTabs tabs={[tab('a', '/a.parquet')]} activeTabId="a" onActivate={vi.fn()} onClose={vi.fn()} onCloseOthers={vi.fn()} onCloseRight={vi.fn()} onReveal={vi.fn()} />)
+  const local = within(view.container)
+  const semanticTab = local.getByRole('tab')
+  vi.spyOn(semanticTab, 'getBoundingClientRect').mockReturnValue({ left: 12, top: 20, right: 112, bottom: 48, width: 100, height: 28, x: 12, y: 20, toJSON: () => ({}) })
+  semanticTab.focus()
+  fireEvent.keyDown(semanticTab, { key: 'ContextMenu' })
+  const items = local.getAllByRole('menuitem')
+  expect(document.activeElement).toBe(items[0])
+  expect(local.getByRole('menu')).toHaveStyle({ left: '12px', top: '48px' })
+  await user.keyboard('{ArrowDown}')
+  expect(document.activeElement).toBe(items[1])
+  await user.keyboard('{End}')
+  expect(document.activeElement).toBe(items[items.length - 1])
+  await user.keyboard('{Home}')
+  expect(document.activeElement).toBe(items[0])
+  await user.keyboard('{ArrowUp}')
+  expect(document.activeElement).toBe(items[items.length - 1])
+  await user.keyboard('{Escape}')
+  expect(local.queryByRole('menu')).not.toBeInTheDocument()
+  expect(document.activeElement).toBe(semanticTab)
+
+  fireEvent.keyDown(semanticTab, { key: 'F10', shiftKey: true })
+  expect(local.getByRole('menu')).toBeInTheDocument()
+})
+
+it('positions pointer context menus at the event coordinates', () => {
+  const view = render(<FileTabs tabs={[tab('a', '/a.parquet')]} activeTabId="a" onActivate={vi.fn()} onClose={vi.fn()} onCloseOthers={vi.fn()} onCloseRight={vi.fn()} onReveal={vi.fn()} />)
+  const local = within(view.container)
+  fireEvent.contextMenu(local.getByRole('tab'), { clientX: 321, clientY: 123 })
+  expect(local.getByRole('menu')).toHaveStyle({ left: '321px', top: '123px' })
 })

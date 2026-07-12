@@ -168,20 +168,41 @@ export const createWorkspaceStore = (
             try { outcomes = await api.openFiles(available.map((tab) => tab.path)) } catch (error) {
               outcomes = available.map(() => ({ ok: false, error: sanitized(error) }))
             }
-            for (let index = 0; index < available.length; index += 1) {
-              const original = available[index]
+            let liveTabs = [...get().tabs]
+            let active = get().activeTabId
+            const errors = { ...get().pathErrors }
+            const successful = new Map<string, { original: WorkspaceTab; outcome: Extract<OpenFileOutcome, { ok: true }> }[]>()
+            available.forEach((original, index) => {
               const outcome = outcomes[index] ?? { ok: false, error: sanitized(null) } as const
-              const live = get().tabs.find((tab) => tab.id === original.id)
-              if (!live) {
-                if (outcome.ok && !get().tabs.some((tab) => tab.status === 'ready' && tab.fileId === outcome.metadata.fileId)) {
-                  try { await api.closeFile(outcome.metadata.fileId) } catch (error) { get().reportError(`Close ${outcome.metadata.fileId}`, error) }
-                }
-                continue
-              }
               if (outcome.ok) {
-                set((state) => ({ tabs: state.tabs.map((tab) => tab.id === original.id ? { ...tab, fileId: outcome.metadata.fileId, path: outcome.metadata.path, metadata: outcome.metadata, status: 'ready', error: undefined } : tab) }))
-              } else {
-                set((state) => ({ tabs: state.tabs.map((tab) => tab.id === original.id ? { ...tab, status: 'error', error: outcome.error } : tab), pathErrors: { ...state.pathErrors, [original.path]: outcome.error } }))
+                const group = successful.get(outcome.metadata.fileId) ?? []
+                group.push({ original, outcome })
+                successful.set(outcome.metadata.fileId, group)
+                delete errors[original.path]
+              } else if (liveTabs.some((tab) => tab.id === original.id)) {
+                errors[original.path] = outcome.error
+                liveTabs = liveTabs.map((tab) => tab.id === original.id ? { ...tab, status: 'error', error: outcome.error } : tab)
+              }
+            })
+            const returnedIds = new Set(successful.keys())
+            for (const [fileId, group] of successful) {
+              const restoredIds = new Set(group.map(({ original }) => original.id))
+              const members = liveTabs.filter((tab) => restoredIds.has(tab.id) || (tab.status === 'ready' && tab.fileId === fileId))
+              if (!members.length) continue
+              const retained = members.find((tab) => tab.id === active) ?? members[0]
+              const restored = group.find(({ original }) => original.id === retained.id)
+              liveTabs = liveTabs
+                .filter((tab) => !members.some((member) => member.id === tab.id) || tab.id === retained.id)
+                .map((tab) => tab.id === retained.id && restored ? {
+                  ...tab, fileId, path: restored.outcome.metadata.path, metadata: restored.outcome.metadata,
+                  status: 'ready', error: undefined,
+                } : tab)
+              if (active && !liveTabs.some((tab) => tab.id === active)) active = retained.id
+            }
+            set({ tabs: liveTabs, activeTabId: active, pathErrors: errors })
+            for (const fileId of returnedIds) {
+              if (!liveTabs.some((tab) => tab.status === 'ready' && tab.fileId === fileId)) {
+                try { await api.closeFile(fileId) } catch (error) { get().reportError(`Close ${fileId}`, error) }
               }
             }
           }
