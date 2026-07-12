@@ -12,6 +12,14 @@ pub struct SessionSnapshot {
     pub active_tab_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoredSession {
+    pub snapshot: SessionSnapshot,
+    pub unavailable_tab_ids: Vec<String>,
+    pub warning: Option<String>,
+}
+
 /// Persisted tab state intentionally excludes transient query IDs and result rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -286,8 +294,8 @@ pub struct SessionViewState {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionFilter, SessionFilterOperator, SessionScalar, SessionSnapshot, SessionSort,
-        SessionSortDirection, SessionTab, SessionViewState,
+        RestoredSession, SessionFilter, SessionFilterOperator, SessionScalar, SessionSnapshot,
+        SessionSort, SessionSortDirection, SessionTab, SessionViewState,
     };
     use serde_json::json;
 
@@ -358,6 +366,37 @@ mod tests {
         assert_eq!(
             serde_json::to_value(snapshot).unwrap(),
             json!({ "version": 1, "tabs": [], "activeTabId": null })
+        );
+    }
+
+    #[test]
+    fn restored_session_uses_exact_camel_case_wire_shape() {
+        let restored = RestoredSession {
+            snapshot: SessionSnapshot {
+                version: 1,
+                tabs: vec![],
+                active_tab_id: None,
+            },
+            unavailable_tab_ids: vec!["tab-1".into()],
+            warning: Some("Saved workspace unavailable".into()),
+        };
+
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            json!({
+                "snapshot": { "version": 1, "tabs": [], "activeTabId": null },
+                "unavailableTabIds": ["tab-1"],
+                "warning": "Saved workspace unavailable"
+            })
+        );
+        assert!(
+            serde_json::from_value::<RestoredSession>(json!({
+                "snapshot": { "version": 1, "tabs": [], "activeTabId": null },
+                "unavailableTabIds": [],
+                "warning": null,
+                "queryId": "query-1"
+            }))
+            .is_err()
         );
     }
 

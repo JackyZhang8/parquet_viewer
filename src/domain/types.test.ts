@@ -8,7 +8,14 @@ import {
   sessionInteger,
   sessionScalarFromNumber,
 } from './types'
-import type { FilterCondition } from './types'
+import type { FilterCondition, RestoredSession } from './types'
+
+const restoredSessionShape: RestoredSession = {
+  snapshot: { version: 1, tabs: [], activeTabId: null },
+  unavailableTabIds: ['tab-1'],
+  warning: null,
+}
+void restoredSessionShape
 
 const nullFilter = { column: 'deleted_at', operator: 'isNull' } satisfies FilterCondition
 const valueFilter = {

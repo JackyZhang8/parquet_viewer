@@ -109,6 +109,12 @@ export interface SessionSnapshot {
   activeTabId: string | null
 }
 
+export interface RestoredSession {
+  snapshot: SessionSnapshot
+  unavailableTabIds: string[]
+  warning: string | null
+}
+
 /** Persisted tab state excludes transient query IDs and result rows. */
 export interface SessionTab {
   id: string
