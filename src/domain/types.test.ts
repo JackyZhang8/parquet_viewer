@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   isAppError,
@@ -105,5 +105,17 @@ describe('IPC runtime guards', () => {
     expect(() => sessionInteger('18446744073709551616')).toThrow(/range/)
     expect(isSessionScalar({ type: 'number', value: 42 })).toBe(false)
     expect(isSessionScalar({ type: 'string', value: '42' })).toBe(true)
+  })
+
+  it('validates integer ranges without requiring the BigInt runtime', () => {
+    vi.stubGlobal('BigInt', undefined)
+    try {
+      expect(sessionInteger('-9223372036854775808')).toEqual({ type: 'integer', value: '-9223372036854775808' })
+      expect(sessionInteger('18446744073709551615')).toEqual({ type: 'integer', value: '18446744073709551615' })
+      expect(() => sessionInteger('-9223372036854775809')).toThrow(/range/)
+      expect(() => sessionInteger('18446744073709551616')).toThrow(/range/)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

@@ -33,15 +33,25 @@ const exactKeys = (value: Record<string, unknown>, keys: string[]) => {
   return actual.length === keys.length && keys.every((key) => actual.includes(key))
 }
 
+const U64_MAX = '18446744073709551615'
+const u64Decimal = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)$/.test(value)) return false
+  return value.length < U64_MAX.length || (value.length === U64_MAX.length && value <= U64_MAX)
+}
+
 const metadata = (value: unknown): FileMetadata | null => {
-  if (!record(value) || !Array.isArray(value.columns)) return null
-  const columns = value.columns.filter(record)
+  if (!record(value) || !exactKeys(value, ['fileId', 'path', 'name', 'sizeBytes', 'rowCount', 'rowGroupCount', 'columns']) ||
+      !Array.isArray(value.columns)) return null
   if (
-    typeof value.fileId !== 'string' || typeof value.path !== 'string' ||
-    typeof value.name !== 'string' || typeof value.sizeBytes !== 'string' ||
-    typeof value.rowCount !== 'string' || typeof value.rowGroupCount !== 'number' ||
-    columns.length !== value.columns.length ||
-    !columns.every((column) => typeof column.name === 'string' && typeof column.logicalType === 'string' && typeof column.nullable === 'boolean')
+    typeof value.fileId !== 'string' || value.fileId.length === 0 ||
+    typeof value.path !== 'string' || value.path.length === 0 ||
+    typeof value.name !== 'string' || value.name.length === 0 ||
+    !u64Decimal(value.sizeBytes) || !u64Decimal(value.rowCount) ||
+    !unsigned(value.rowGroupCount, 0xffff_ffff) ||
+    !value.columns.every((column) => record(column) && exactKeys(column, ['name', 'logicalType', 'nullable']) &&
+      typeof column.name === 'string' && column.name.length > 0 &&
+      typeof column.logicalType === 'string' && column.logicalType.length > 0 &&
+      typeof column.nullable === 'boolean')
   ) return null
   return value as unknown as FileMetadata
 }
@@ -49,19 +59,21 @@ const metadata = (value: unknown): FileMetadata | null => {
 export const normalizeOpenOutcomes = (value: unknown): OpenFileOutcome[] => {
   if (!Array.isArray(value)) throw internalError()
   return value.map((item) => {
-    if (!record(item)) return { ok: false, error: internalError() }
-    const okValue = item.Ok ?? item.ok
-    const errorValue = item.Err ?? item.err
-    const parsed = metadata(okValue)
-    if (parsed) return { ok: true, metadata: parsed }
-    if (isAppError(errorValue)) return { ok: false, error: errorValue }
+    if (!record(item) || Object.keys(item).length !== 1) return { ok: false, error: internalError() }
+    if (Object.hasOwn(item, 'Ok')) {
+      const parsed = metadata(item.Ok)
+      if (parsed) return { ok: true, metadata: parsed }
+    }
+    if (Object.hasOwn(item, 'Err') && record(item.Err) && exactKeys(item.Err, ['code', 'message', 'detail']) && isAppError(item.Err)) {
+      return { ok: false, error: item.Err }
+    }
     return { ok: false, error: internalError() }
   })
 }
 
-const FILTER_OPERATORS = new Set(['eq', 'notEq', 'lt', 'lte', 'gt', 'gte', 'contains', 'startsWith', 'endsWith', 'isNull', 'isNotNull'])
 const unsigned = (value: unknown, max: number) =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max
+const FILTER_OPERATORS = new Set(['eq', 'notEq', 'lt', 'lte', 'gt', 'gte', 'contains', 'startsWith', 'endsWith', 'isNull', 'isNotNull'])
 
 const sessionTab = (value: unknown): value is RestoredSession['snapshot']['tabs'][number] => {
   if (!record(value) || !exactKeys(value, ['id', 'fileId', 'path', 'sqlDraft', 'filters', 'sorts', 'viewState'])) return false

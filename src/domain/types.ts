@@ -153,15 +153,18 @@ export type SessionScalar =
   | { type: 'decimal'; value: string }
   | { type: 'string'; value: string }
 
-const I64_MIN = -(1n << 63n)
-const U64_MAX = (1n << 64n) - 1n
+const I64_MIN_MAGNITUDE = '9223372036854775808'
+const U64_MAX = '18446744073709551615'
 const CANONICAL_INTEGER = /^(?:0|-[1-9]\d*|[1-9]\d*)$/
 const CANONICAL_DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d+)?$|^-(?:0\.(?!0+$)\d+|[1-9]\d*(?:\.\d+)?)$/
 
 const isCanonicalSessionInteger = (value: string): boolean => {
   if (!CANONICAL_INTEGER.test(value)) return false
-  const integer = BigInt(value)
-  return integer >= I64_MIN && integer <= U64_MAX
+  const negative = value.startsWith('-')
+  const magnitude = negative ? value.slice(1) : value
+  const limit = negative ? I64_MIN_MAGNITUDE : U64_MAX
+  return magnitude.length < limit.length ||
+    (magnitude.length === limit.length && magnitude <= limit)
 }
 
 export const sessionInteger = (value: string): SessionScalar => {

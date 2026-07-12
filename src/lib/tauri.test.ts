@@ -6,7 +6,13 @@ vi.mock('@tauri-apps/api/webview', () => ({ getCurrentWebview: vi.fn() }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ revealItemInDir: vi.fn() }))
 
-import { desktopApi } from './tauri'
+import { desktopApi, normalizeOpenOutcomes } from './tauri'
+
+const opened = () => ({
+  fileId: 'file-1', path: '/a.parquet', name: 'a.parquet', sizeBytes: '18446744073709551615',
+  rowCount: '0', rowGroupCount: 2,
+  columns: [{ name: 'id', logicalType: 'INT64', nullable: false }],
+})
 
 const tab = () => ({
   id: 'tab-1', fileId: 'file-1', path: '/a.parquet', sqlDraft: '', filters: [], sorts: [],
@@ -14,6 +20,32 @@ const tab = () => ({
 })
 
 beforeEach(() => invoke.mockReset())
+
+it('accepts exact tagged open outcomes', () => {
+  const error = { code: 'INVALID_PARQUET', message: 'Bad footer', detail: null }
+  expect(normalizeOpenOutcomes([{ Ok: opened() }, { Err: error }])).toEqual([
+    { ok: true, metadata: opened() }, { ok: false, error },
+  ])
+})
+
+it.each([
+  ['invalid decimal', { Ok: { ...opened(), sizeBytes: '12.5' } }],
+  ['negative decimal', { Ok: { ...opened(), rowCount: '-1' } }],
+  ['leading zero', { Ok: { ...opened(), sizeBytes: '01' } }],
+  ['u64 overflow', { Ok: { ...opened(), sizeBytes: '18446744073709551616' } }],
+  ['NaN row groups', { Ok: { ...opened(), rowGroupCount: Number.NaN } }],
+  ['fractional row groups', { Ok: { ...opened(), rowGroupCount: 1.5 } }],
+  ['overflow row groups', { Ok: { ...opened(), rowGroupCount: 0x1_0000_0000 } }],
+  ['extra metadata key', { Ok: { ...opened(), queryId: 'leak' } }],
+  ['extra column key', { Ok: { ...opened(), columns: [{ ...opened().columns[0], secret: true }] } }],
+  ['both result tags', { Ok: opened(), Err: { code: 'INVALID_PARQUET', message: 'Bad', detail: null } }],
+  ['extra error key', { Err: { code: 'INVALID_PARQUET', message: 'Bad', detail: null, debug: '/secret' } }],
+])('sanitizes malformed open outcome: %s', (_name, outcome) => {
+  expect(normalizeOpenOutcomes([outcome])).toEqual([{
+    ok: false,
+    error: { code: 'INTERNAL_ERROR', message: 'An internal error occurred', detail: null },
+  }])
+})
 
 it('accepts an exact restored session payload', async () => {
   const restored = { snapshot: { version: 1, tabs: [tab()], activeTabId: 'tab-1' }, unavailableTabIds: [], warning: null }
