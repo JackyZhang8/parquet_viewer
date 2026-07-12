@@ -3,7 +3,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { open } from '@tauri-apps/plugin-dialog'
 import { revealItemInDir as reveal } from '@tauri-apps/plugin-opener'
 import type { AppError, FileMetadata, RestoredSession, SessionSnapshot } from '../domain/types'
-import { isAppError } from '../domain/types'
+import { isAppError, isSessionScalar } from '../domain/types'
 
 export type OpenFileOutcome =
   | { ok: true; metadata: FileMetadata }
@@ -27,6 +27,11 @@ const internalError = (): AppError => ({
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const exactKeys = (value: Record<string, unknown>, keys: string[]) => {
+  const actual = Object.keys(value)
+  return actual.length === keys.length && keys.every((key) => actual.includes(key))
+}
 
 const metadata = (value: unknown): FileMetadata | null => {
   if (!record(value) || !Array.isArray(value.columns)) return null
@@ -54,10 +59,37 @@ export const normalizeOpenOutcomes = (value: unknown): OpenFileOutcome[] => {
   })
 }
 
+const FILTER_OPERATORS = new Set(['eq', 'notEq', 'lt', 'lte', 'gt', 'gte', 'contains', 'startsWith', 'endsWith', 'isNull', 'isNotNull'])
+const unsigned = (value: unknown, max: number) =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max
+
+const sessionTab = (value: unknown): value is RestoredSession['snapshot']['tabs'][number] => {
+  if (!record(value) || !exactKeys(value, ['id', 'fileId', 'path', 'sqlDraft', 'filters', 'sorts', 'viewState'])) return false
+  if (typeof value.id !== 'string' || typeof value.fileId !== 'string' || typeof value.path !== 'string' || typeof value.sqlDraft !== 'string') return false
+  if (!Array.isArray(value.filters) || !value.filters.every((filter) =>
+    record(filter) && exactKeys(filter, ['column', 'operator', 'value']) &&
+    typeof filter.column === 'string' && typeof filter.operator === 'string' &&
+    FILTER_OPERATORS.has(filter.operator) && isSessionScalar(filter.value))) return false
+  if (!Array.isArray(value.sorts) || !value.sorts.every((sort) =>
+    record(sort) && exactKeys(sort, ['column', 'direction']) && typeof sort.column === 'string' &&
+    (sort.direction === 'asc' || sort.direction === 'desc'))) return false
+  const view = value.viewState
+  return record(view) && exactKeys(view, ['scrollTop', 'scrollLeft', 'sidebarWidth', 'editorHeight']) &&
+    unsigned(view.scrollTop, 0xffff_ffff) && unsigned(view.scrollLeft, 0xffff_ffff) &&
+    unsigned(view.sidebarWidth, 0xffff) && unsigned(view.editorHeight, 0xffff)
+}
+
 const restoredSession = (value: unknown): RestoredSession => {
-  if (!record(value) || !record(value.snapshot) || !Array.isArray(value.snapshot.tabs) ||
-      !Array.isArray(value.unavailableTabIds) ||
+  if (!record(value) || !exactKeys(value, ['snapshot', 'unavailableTabIds', 'warning']) ||
+      !record(value.snapshot) || !exactKeys(value.snapshot, ['version', 'tabs', 'activeTabId']) ||
+      value.snapshot.version !== 1 || !Array.isArray(value.snapshot.tabs) || !value.snapshot.tabs.every(sessionTab) ||
+      !(value.snapshot.activeTabId === null || typeof value.snapshot.activeTabId === 'string') ||
+      !Array.isArray(value.unavailableTabIds) || !value.unavailableTabIds.every((id) => typeof id === 'string') ||
       !(value.warning === null || typeof value.warning === 'string')) throw internalError()
+  const ids = new Set(value.snapshot.tabs.map((tab) => tab.id))
+  if (ids.size !== value.snapshot.tabs.length ||
+      (value.snapshot.activeTabId !== null && !ids.has(value.snapshot.activeTabId)) ||
+      !value.unavailableTabIds.every((id) => ids.has(id))) throw internalError()
   return value as unknown as RestoredSession
 }
 

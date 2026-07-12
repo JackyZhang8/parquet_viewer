@@ -29,9 +29,8 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
       {Object.entries(state.pathErrors).map(([path, error]) => <div className="error-banner" role="alert" key={path}><strong>{path.split(/[\\/]/).pop()}</strong>: {error.message}</div>)}
       {state.tabs.length === 0 ? <div className="empty-workspace"><DropZone pickFiles={api.pickParquetFiles} onOpen={state.openPaths} />{state.opening > 0 && <p>Opening {state.opening} file(s)…</p>}</div> : <>
         <FileTabs tabs={state.tabs} activeTabId={state.activeTabId} onActivate={state.activateTab} onClose={(id) => void state.closeTab(id)} onCloseOthers={(id) => void state.closeOthers(id)} onCloseRight={(id) => void state.closeRight(id)} onReveal={(path) => void api.revealItemInDir(path)} />
-        <section className="workspace">
-          <aside className="sidebar"><div className="panel-heading">File</div><div className="file-card"><strong>{active?.metadata?.name ?? active?.path}</strong><span>{active?.status}</span></div><div className="panel-heading">Schema</div><p className="placeholder-copy">Schema details arrive in the next workspace layer.</p></aside>
-          <div className="main-pane"><section className="editor-placeholder"><div className="panel-heading">SQL workspace</div><textarea aria-label="SQL draft" value={active?.sqlDraft ?? ''} onChange={(event) => active && state.setSqlDraft(active.id, event.target.value)} placeholder="SQL editor coming next" /></section><section className="data-placeholder"><div className="panel-heading">Data</div><div className="placeholder-center"><strong>Data preview will appear here</strong><span>Choose filters or run a query in a later step.</span></div></section></div>
+        <section className="workspace-placeholder">
+          <div className="opened-file-card"><span className={`opened-status ${active?.status}`} aria-hidden="true" /><div><strong>File opened</strong><p>{active?.metadata?.name ?? active?.path}</p><code>{active?.path}</code><span className="file-state">{active?.status}</span></div></div>
         </section>
       </>}
     </main>

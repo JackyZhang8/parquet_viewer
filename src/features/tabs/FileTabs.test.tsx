@@ -23,6 +23,13 @@ it('provides accessible activation, keyboard navigation, close, search, and cont
   first.focus()
   await user.keyboard('{ArrowRight}')
   expect(activate).toHaveBeenCalledWith('b')
+  expect(document.activeElement).toBe(screen.getAllByRole('tab')[1])
+  await user.keyboard('{End}')
+  expect(activate).toHaveBeenCalledWith('c')
+  expect(document.activeElement).toBe(screen.getAllByRole('tab')[2])
+  await user.keyboard('{Home}')
+  expect(activate).toHaveBeenCalledWith('a')
+  expect(document.activeElement).toBe(first)
   await user.keyboard('{Delete}')
   expect(close).toHaveBeenCalledWith('a')
 

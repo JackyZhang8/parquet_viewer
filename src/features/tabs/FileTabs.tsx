@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { WorkspaceTab } from '../../stores/workspace'
 
 interface FileTabsProps {
@@ -19,20 +19,23 @@ export function FileTabs(props: FileTabsProps) {
   const [filesOpen, setFilesOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [menuTab, setMenuTab] = useState<WorkspaceTab | null>(null)
+  const tablist = useRef<HTMLDivElement>(null)
   const filtered = useMemo(() => props.tabs.filter((tab) => tab.path.toLowerCase().includes(search.toLowerCase())), [props.tabs, search])
   const keyDown = (event: React.KeyboardEvent, tab: WorkspaceTab, index: number) => {
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); props.onActivate(tab.id) }
     if (event.key === 'Delete') { event.preventDefault(); props.onClose(tab.id) }
-    if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+    if (event.key === 'ArrowRight' || event.key === 'ArrowLeft' || event.key === 'Home' || event.key === 'End') {
       event.preventDefault()
-      const offset = event.key === 'ArrowRight' ? 1 : -1
-      props.onActivate(props.tabs[(index + offset + props.tabs.length) % props.tabs.length].id)
+      const target = event.key === 'Home' ? 0 : event.key === 'End' ? props.tabs.length - 1 :
+        (index + (event.key === 'ArrowRight' ? 1 : -1) + props.tabs.length) % props.tabs.length
+      props.onActivate(props.tabs[target].id)
+      tablist.current?.querySelectorAll<HTMLElement>('[role="tab"]')[target]?.focus()
     }
   }
   const menuAction = (action: () => void | Promise<void>) => { void action(); setMenuTab(null) }
   return (
     <div className="tabs-bar">
-      <div className="file-tabs" role="tablist" aria-label="Open files">
+      <div className="file-tabs" role="tablist" aria-label="Open files" ref={tablist}>
         {props.tabs.map((tab, index) => (
           <div key={tab.id} role="tab" tabIndex={tab.id === props.activeTabId ? 0 : -1}
             aria-selected={tab.id === props.activeTabId}

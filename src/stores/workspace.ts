@@ -90,8 +90,9 @@ export const createWorkspaceStore = (
     let active = state.activeTabId
     if (active && ids.has(active)) {
       const activeIndex = state.tabs.findIndex((tab) => tab.id === active)
+      const previous = remaining.filter((tab) => state.tabs.indexOf(tab) < activeIndex)
       active = remaining.find((tab) => state.tabs.indexOf(tab) > activeIndex)?.id ??
-        remaining.filter((tab) => state.tabs.indexOf(tab) < activeIndex).at(-1)?.id ?? null
+        previous[previous.length - 1]?.id ?? null
     }
     updateTabs(remaining, active)
     const remainingIds = new Set(remaining.map((tab) => tab.fileId))
