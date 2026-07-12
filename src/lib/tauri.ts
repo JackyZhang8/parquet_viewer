@@ -107,7 +107,14 @@ const restoredSession = (value: unknown): RestoredSession => {
 
 export const desktopApi: DesktopApi = {
   async openFiles(paths) {
-    return normalizeOpenOutcomes(await invoke('open_files', { paths }))
+    const outcomes = normalizeOpenOutcomes(await invoke('open_files', { paths }))
+    if (outcomes.length !== paths.length) {
+      await Promise.all(outcomes.filter((outcome) => outcome.ok).map(async (outcome) => {
+        try { await invoke('close_file', { fileId: outcome.metadata.fileId }) } catch { /* best effort */ }
+      }))
+      throw internalError()
+    }
+    return outcomes
   },
   closeFile: (fileId) => invoke('close_file', { fileId }),
   async loadSession() {

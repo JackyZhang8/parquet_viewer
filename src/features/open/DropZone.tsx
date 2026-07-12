@@ -1,13 +1,16 @@
 interface DropZoneProps {
   pickFiles(): Promise<string[] | null>
   onOpen(paths: string[]): void | Promise<void>
+  onError?(key: string, error: unknown): void
   compact?: boolean
 }
 
-export function DropZone({ pickFiles, onOpen, compact = false }: DropZoneProps) {
+export function DropZone({ pickFiles, onOpen, onError, compact = false }: DropZoneProps) {
   const choose = async () => {
-    const paths = await pickFiles()
-    if (paths?.length) await onOpen(paths)
+    try {
+      const paths = await pickFiles()
+      if (paths?.length) await onOpen(paths)
+    } catch (error) { onError?.('File picker', error) }
   }
   if (compact) return <button className="open-button" onClick={() => void choose()}>Open Parquet files</button>
   return (

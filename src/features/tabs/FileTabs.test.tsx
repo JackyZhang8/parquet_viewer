@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
 import type { WorkspaceTab } from '../../stores/workspace'
@@ -39,9 +39,38 @@ it('provides accessible activation, keyboard navigation, close, search, and cont
   expect(activate).toHaveBeenCalledWith('c')
 
   await user.pointer({ keys: '[MouseRight]', target: first })
+  expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Close' }))
   await user.click(screen.getByRole('menuitem', { name: 'Copy path' }))
   expect(writeText).toHaveBeenCalledWith('/one/data.parquet')
   await user.pointer({ keys: '[MouseRight]', target: first })
   await user.click(screen.getByRole('menuitem', { name: 'Reveal in file manager' }))
   expect(reveal).toHaveBeenCalledWith('/one/data.parquet')
+})
+
+it('uses sibling tab and close controls and dismisses menus with Escape/outside click', async () => {
+  const user = userEvent.setup()
+  const view = render(<FileTabs tabs={[tab('a', '/a.parquet')]} activeTabId="a" onActivate={vi.fn()} onClose={vi.fn()} onCloseOthers={vi.fn()} onCloseRight={vi.fn()} onReveal={vi.fn()} />)
+  const local = within(view.container)
+  const semanticTab = local.getByRole('tab')
+  expect(semanticTab.querySelector('button')).toBeNull()
+  expect(local.getByRole('button', { name: /close a.parquet/i })).not.toBe(semanticTab)
+  await user.pointer({ keys: '[MouseRight]', target: semanticTab })
+  expect(local.getByRole('menu')).toBeInTheDocument()
+  await user.keyboard('{Escape}')
+  expect(local.queryByRole('menu')).not.toBeInTheDocument()
+  await user.click(local.getByRole('button', { name: /opened files/i }))
+  expect(document.activeElement).toBe(local.getByRole('searchbox'))
+  await user.click(document.body)
+  expect(local.queryByRole('searchbox')).not.toBeInTheDocument()
+})
+
+it('reports rejected context actions without an unhandled promise', async () => {
+  const user = userEvent.setup()
+  const onError = vi.fn()
+  const reveal = vi.fn(async () => { throw new Error('denied') })
+  const view = render(<FileTabs tabs={[tab('a', '/a.parquet')]} activeTabId="a" onActivate={vi.fn()} onClose={vi.fn()} onCloseOthers={vi.fn()} onCloseRight={vi.fn()} onReveal={reveal} onError={onError} />)
+  const local = within(view.container)
+  await user.pointer({ keys: '[MouseRight]', target: local.getByRole('tab') })
+  await user.click(local.getByRole('menuitem', { name: /reveal/i }))
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith('Reveal file', expect.any(Error)))
 })

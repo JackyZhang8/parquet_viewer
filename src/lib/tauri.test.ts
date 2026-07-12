@@ -65,3 +65,14 @@ it.each([
   invoke.mockResolvedValue(restored)
   await expect(desktopApi.loadSession()).rejects.toEqual({ code: 'INTERNAL_ERROR', message: 'An internal error occurred', detail: null })
 })
+
+it.each([
+  ['missing', [{ Ok: opened() }], ['/a', '/b']],
+  ['extra', [{ Ok: opened() }, { Ok: { ...opened(), fileId: 'file-2', path: '/b', name: 'b' } }], ['/a']],
+])('closes returned handles and rejects %s open outcome cardinality', async (_name, outcomes, paths) => {
+  invoke.mockImplementation(async (command: string) => command === 'open_files' ? outcomes : undefined)
+  await expect(desktopApi.openFiles(paths)).rejects.toEqual({ code: 'INTERNAL_ERROR', message: 'An internal error occurred', detail: null })
+  expect(invoke.mock.calls.filter(([command]) => command === 'close_file').map(([, args]) => args)).toEqual(
+    outcomes.map((outcome) => ({ fileId: outcome.Ok.fileId })),
+  )
+})

@@ -15,20 +15,23 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | undefined
-    void store.getState().hydrate()
-    void api.onFileDrop((paths) => void store.getState().openPaths(paths)).then((cleanup) => {
+    store.getState().resume()
+    store.getState().hydrate().catch((error) => store.getState().reportError('Session restore', error))
+    api.onFileDrop((paths) => {
+      store.getState().openPaths(paths).catch((error) => store.getState().reportError('File drop', error))
+    }).then((cleanup) => {
       if (disposed) cleanup(); else unlisten = cleanup
-    })
-    return () => { disposed = true; unlisten?.(); if (!suppliedStore) store.getState().dispose() }
+    }).catch((error) => store.getState().reportError('File drop', error))
+    return () => { disposed = true; unlisten?.(); store.getState().dispose() }
   }, [api, store, suppliedStore])
   const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0]
   return (
     <main className="app-shell">
-      <header className="titlebar"><span className="app-mark">P</span><strong>Parquet Viewer</strong><DropZone compact pickFiles={api.pickParquetFiles} onOpen={state.openPaths} /></header>
+      <header className="titlebar"><span className="app-mark">P</span><strong>Parquet Viewer</strong><DropZone compact pickFiles={api.pickParquetFiles} onOpen={state.openPaths} onError={state.reportError} /></header>
       {state.warning && <div className="warning-banner" role="status">{state.warning}</div>}
       {Object.entries(state.pathErrors).map(([path, error]) => <div className="error-banner" role="alert" key={path}><strong>{path.split(/[\\/]/).pop()}</strong>: {error.message}</div>)}
-      {state.tabs.length === 0 ? <div className="empty-workspace"><DropZone pickFiles={api.pickParquetFiles} onOpen={state.openPaths} />{state.opening > 0 && <p>Opening {state.opening} file(s)…</p>}</div> : <>
-        <FileTabs tabs={state.tabs} activeTabId={state.activeTabId} onActivate={state.activateTab} onClose={(id) => void state.closeTab(id)} onCloseOthers={(id) => void state.closeOthers(id)} onCloseRight={(id) => void state.closeRight(id)} onReveal={(path) => void api.revealItemInDir(path)} />
+      {state.tabs.length === 0 ? <div className="empty-workspace"><DropZone pickFiles={api.pickParquetFiles} onOpen={state.openPaths} onError={state.reportError} />{state.opening > 0 && <p>Opening {state.opening} file(s)…</p>}</div> : <>
+        <FileTabs tabs={state.tabs} activeTabId={state.activeTabId} onActivate={state.activateTab} onClose={state.closeTab} onCloseOthers={state.closeOthers} onCloseRight={state.closeRight} onReveal={api.revealItemInDir} onError={state.reportError} />
         <section className="workspace-placeholder">
           <div className="opened-file-card"><span className={`opened-status ${active?.status}`} aria-hidden="true" /><div><strong>File opened</strong><p>{active?.metadata?.name ?? active?.path}</p><code>{active?.path}</code><span className="file-state">{active?.status}</span></div></div>
         </section>

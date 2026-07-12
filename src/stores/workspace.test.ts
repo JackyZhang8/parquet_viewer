@@ -4,6 +4,12 @@ import type { AppError, FileMetadata, RestoredSession, SessionSnapshot } from '.
 import type { DesktopApi, OpenFileOutcome } from '../lib/tauri'
 import { createWorkspaceStore } from './workspace'
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 const metadata = (fileId: string, path: string): FileMetadata => ({
   fileId,
   path,
@@ -134,5 +140,62 @@ describe('workspace store', () => {
     expect(saved.tabs[0]).not.toHaveProperty('status')
     expect(saved.tabs[0].fileId).toBe('f0')
     store.getState().dispose()
+  })
+
+  it('waits for hydration before opening user paths and preserves exact path text', async () => {
+    const loading = deferred<RestoredSession>()
+    const desktop = api({ loadSession: vi.fn(() => loading.promise) })
+    const store = createWorkspaceStore(desktop)
+    const hydrate = store.getState().hydrate()
+    const opening = store.getState().openPaths([' /new.parquet '])
+    expect(desktop.openFiles).not.toHaveBeenCalled()
+    loading.resolve({
+      snapshot: { version: 1, activeTabId: 'saved', tabs: [{ id: 'saved', fileId: 'old', path: '/saved.parquet', sqlDraft: '', filters: [], sorts: [], viewState: { scrollTop: 0, scrollLeft: 0, sidebarWidth: 200, editorHeight: 100 } }] },
+      unavailableTabIds: ['saved'], warning: null,
+    })
+    await hydrate
+    await opening
+    expect(desktop.openFiles).toHaveBeenCalledWith([' /new.parquet '])
+    expect(store.getState().tabs.map((tab) => tab.id)).toContain('saved')
+    expect(store.getState().tabs.some((tab) => tab.path === ' /new.parquet ')).toBe(true)
+  })
+
+  it('closes a restored loading tab without stale close and cleans the reopened orphan', async () => {
+    const reopening = deferred<OpenFileOutcome[]>()
+    const desktop = api({
+      loadSession: vi.fn(async () => ({
+        snapshot: { version: 1, activeTabId: 'saved', tabs: [{ id: 'saved', fileId: 'stale', path: '/saved.parquet', sqlDraft: '', filters: [], sorts: [], viewState: { scrollTop: 0, scrollLeft: 0, sidebarWidth: 200, editorHeight: 100 } }] },
+        unavailableTabIds: [], warning: null,
+      })),
+      openFiles: vi.fn(() => reopening.promise),
+    })
+    const store = createWorkspaceStore(desktop)
+    const hydration = store.getState().hydrate()
+    await vi.waitFor(() => expect(store.getState().tabs[0]?.status).toBe('loading'))
+    await store.getState().closeTab('saved')
+    expect(desktop.closeFile).not.toHaveBeenCalled()
+    reopening.resolve([{ ok: true, metadata: metadata('new-id', '/saved.parquet') }])
+    await hydration
+    expect(store.getState().tabs).toHaveLength(0)
+    expect(desktop.closeFile).toHaveBeenCalledWith('new-id')
+  })
+
+  it('preserves hydrate error details and reuses the tab on successful retry', async () => {
+    const desktop = api({
+      loadSession: vi.fn(async () => ({
+        snapshot: { version: 1, activeTabId: 'saved', tabs: [{ id: 'saved', fileId: 'stale', path: '/saved.parquet', sqlDraft: 'draft', filters: [], sorts: [], viewState: { scrollTop: 7, scrollLeft: 0, sidebarWidth: 200, editorHeight: 100 } }] },
+        unavailableTabIds: [], warning: null,
+      })),
+      openFiles: vi.fn(async (): Promise<OpenFileOutcome[]> => [{ ok: false, error: invalid }]),
+    })
+    const store = createWorkspaceStore(desktop)
+    await store.getState().hydrate()
+    expect(store.getState().tabs[0]).toMatchObject({ id: 'saved', status: 'error', error: invalid })
+    expect(store.getState().pathErrors['/saved.parquet']).toEqual(invalid)
+    vi.mocked(desktop.openFiles).mockResolvedValueOnce([{ ok: true, metadata: metadata('new', '/saved.parquet') }])
+    await store.getState().openPaths(['/saved.parquet'])
+    expect(store.getState().tabs).toHaveLength(1)
+    expect(store.getState().tabs[0]).toMatchObject({ id: 'saved', status: 'ready', sqlDraft: 'draft', fileId: 'new' })
+    expect(store.getState().tabs[0].error).toBeUndefined()
   })
 })
