@@ -175,7 +175,7 @@ pub(super) fn cell_from_array(array: &dyn Array, row: usize) -> Result<Converted
             let mut size = 2;
             for (field, column) in values.fields().iter().zip(values.columns()) {
                 let cell = cell_from_array(column.as_ref(), row)?;
-                size = checked_add(size, field.name().len() + 3 + cell.encoded_bytes)?;
+                size = object_entry_encoded_size(size, field.name(), &cell, !object.is_empty())?;
                 object.insert(field.name().clone(), cell.value);
             }
             return converted(CellValue::Object(object), size);
@@ -186,18 +186,12 @@ pub(super) fn cell_from_array(array: &dyn Array, row: usize) -> Result<Converted
                 .downcast_ref::<MapArray>()
                 .unwrap()
                 .value(row);
-            let mut result = Vec::with_capacity(entries.len());
-            let mut size = 2;
-            for index in 0..entries.len() {
-                let key = cell_from_array(entries.column(0).as_ref(), index)?;
-                let value = cell_from_array(entries.column(1).as_ref(), index)?;
-                let mut entry = BTreeMap::new();
-                entry.insert("key".into(), key.value);
-                entry.insert("value".into(), value.value);
-                size = checked_add(size, key.encoded_bytes + value.encoded_bytes + 20)?;
-                result.push(CellValue::Object(entry));
-            }
-            return converted(CellValue::Array(result), size);
+            return collect_map_cells((0..entries.len()).map(|index| {
+                Ok((
+                    cell_from_array(entries.column(0).as_ref(), index)?,
+                    cell_from_array(entries.column(1).as_ref(), index)?,
+                ))
+            }));
         }
         _ => CellValue::String(text()),
     };
@@ -212,14 +206,55 @@ pub(super) fn cell_from_array(array: &dyn Array, row: usize) -> Result<Converted
 }
 
 fn array_cell(values: &dyn Array) -> Result<ConvertedCell, AppError> {
-    let mut result = Vec::with_capacity(values.len());
+    collect_array_cells((0..values.len()).map(|index| cell_from_array(values, index)))
+}
+
+fn collect_array_cells<I>(cells: I) -> Result<ConvertedCell, AppError>
+where
+    I: IntoIterator<Item = Result<ConvertedCell, AppError>>,
+{
+    let mut result = Vec::new();
     let mut size = 2;
-    for index in 0..values.len() {
-        let cell = cell_from_array(values, index)?;
-        size = checked_add(size, cell.encoded_bytes + 1)?;
+    for cell in cells {
+        let cell = cell?;
+        size = checked_add(size, usize::from(!result.is_empty()))?;
+        size = checked_add(size, cell.encoded_bytes)?;
         result.push(cell.value);
     }
     converted(CellValue::Array(result), size)
+}
+
+fn collect_map_cells<I>(entries: I) -> Result<ConvertedCell, AppError>
+where
+    I: IntoIterator<Item = Result<(ConvertedCell, ConvertedCell), AppError>>,
+{
+    let mut result = Vec::new();
+    let mut size = 2;
+    for entry in entries {
+        let (key, value) = entry?;
+        size = checked_add(size, usize::from(!result.is_empty()))?;
+        size = checked_add(size, 17)?;
+        size = checked_add(size, key.encoded_bytes)?;
+        size = checked_add(size, value.encoded_bytes)?;
+        let mut object = BTreeMap::new();
+        object.insert("key".into(), key.value);
+        object.insert("value".into(), value.value);
+        result.push(CellValue::Object(object));
+    }
+    converted(CellValue::Array(result), size)
+}
+
+fn object_entry_encoded_size(
+    current_size: usize,
+    key: &str,
+    cell: &ConvertedCell,
+    has_entries: bool,
+) -> Result<usize, AppError> {
+    let key_bytes = json_encoded_len(&key, MAX_CELL_ENCODED_BYTES)?;
+    let size = checked_add(current_size, usize::from(has_entries))?;
+    let size = checked_add(size, key_bytes)?;
+    let size = checked_add(size, 1)?;
+    checked_add(size, cell.encoded_bytes)
 }
 
 fn blob_cell(bytes: &[u8]) -> Result<ConvertedCell, AppError> {
@@ -245,6 +280,9 @@ fn converted(value: CellValue, encoded_bytes: usize) -> Result<ConvertedCell, Ap
 
 fn checked_add(left: usize, right: usize) -> Result<usize, AppError> {
     let size = left.checked_add(right).ok_or_else(resource_exhausted)?;
+    if size > MAX_CELL_ENCODED_BYTES {
+        return Err(resource_exhausted());
+    }
     Ok(size)
 }
 
@@ -282,4 +320,55 @@ impl Write for CountingWriter {
 
 fn resource_exhausted() -> AppError {
     AppError::ResourceExhausted("A query value exceeds the configured memory limit".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::{
+        ConvertedCell, MAX_CELL_ENCODED_BYTES, collect_array_cells, collect_map_cells,
+        object_entry_encoded_size,
+    };
+    use crate::models::CellValue;
+
+    fn null_cell() -> ConvertedCell {
+        ConvertedCell {
+            value: CellValue::Null,
+            encoded_bytes: 4,
+        }
+    }
+
+    #[test]
+    fn huge_nested_array_stops_visiting_before_full_input_length() {
+        let visited = Cell::new(0_usize);
+        let cells = (0..1_000_000).map(|_| {
+            visited.set(visited.get() + 1);
+            Ok(null_cell())
+        });
+
+        assert!(collect_array_cells(cells).is_err());
+        assert!(visited.get() > 200_000);
+        assert!(visited.get() < 300_000);
+    }
+
+    #[test]
+    fn huge_nested_map_stops_visiting_before_full_input_length() {
+        let visited = Cell::new(0_usize);
+        let entries = (0..1_000_000).map(|_| {
+            visited.set(visited.get() + 1);
+            Ok((null_cell(), null_cell()))
+        });
+
+        assert!(collect_map_cells(entries).is_err());
+        assert!(visited.get() > 30_000);
+        assert!(visited.get() < 100_000);
+    }
+
+    #[test]
+    fn escaped_struct_keys_are_counted_as_encoded_json() {
+        let key = "\"\\\n".repeat(MAX_CELL_ENCODED_BYTES / 4);
+        assert!(key.len() < MAX_CELL_ENCODED_BYTES);
+        assert!(object_entry_encoded_size(2, &key, &null_cell(), false).is_err());
+    }
 }
