@@ -55,6 +55,7 @@ pub enum SessionScalar {
     Boolean(bool),
     Number(f64),
     Integer(String),
+    Decimal(String),
     String(String),
 }
 
@@ -87,6 +88,15 @@ impl Serialize for SessionScalar {
                     ));
                 }
                 state.serialize_field("type", "integer")?;
+                state.serialize_field("value", value)?;
+            }
+            Self::Decimal(value) => {
+                if !is_canonical_decimal(value) {
+                    return Err(serde::ser::Error::custom(
+                        "session scalar decimal is not canonical",
+                    ));
+                }
+                state.serialize_field("type", "decimal")?;
                 state.serialize_field("value", value)?;
             }
             Self::String(value) => {
@@ -191,6 +201,16 @@ where
                 ))
             }
         }
+        "decimal" => {
+            let decimal = scalar_value
+                .as_str()
+                .ok_or_else(|| E::custom("decimal scalar requires a string value"))?;
+            if is_canonical_decimal(decimal) {
+                Ok(SessionScalar::Decimal(decimal.into()))
+            } else {
+                Err(E::custom("session scalar decimal is not canonical"))
+            }
+        }
         "string" => scalar_value
             .as_str()
             .map(|value| SessionScalar::String(value.into()))
@@ -214,6 +234,29 @@ fn is_canonical_integer(value: &str) -> bool {
     !value.starts_with('0')
         && value.bytes().all(|byte| byte.is_ascii_digit())
         && value.parse::<u64>().is_ok()
+}
+
+pub(crate) fn is_canonical_decimal(value: &str) -> bool {
+    let (negative, unsigned) = match value.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, value),
+    };
+    let (integer, fraction) = match unsigned.split_once('.') {
+        Some((integer, fraction)) => (integer, Some(fraction)),
+        None => (unsigned, None),
+    };
+    if integer.is_empty()
+        || (integer.len() > 1 && integer.starts_with('0'))
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_some_and(|digits| {
+            digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return false;
+    }
+    let is_zero = integer.bytes().all(|byte| byte == b'0')
+        && fraction.is_none_or(|digits| digits.bytes().all(|byte| byte == b'0'));
+    !(negative && is_zero)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -449,5 +492,40 @@ mod tests {
 
         assert!(serde_json::from_str::<SessionScalar>(duplicate_type).is_err());
         assert!(serde_json::from_str::<SessionScalar>(duplicate_value).is_err());
+    }
+
+    #[test]
+    fn decimal_scalars_use_canonical_exact_strings() {
+        let valid = [
+            "0",
+            "1",
+            "-1",
+            "0.1",
+            "-0.1",
+            "99999999999999999999999999999999999999",
+        ];
+        for value in valid {
+            let scalar = SessionScalar::Decimal(value.into());
+            assert_eq!(
+                serde_json::to_value(&scalar).unwrap(),
+                json!({ "type": "decimal", "value": value })
+            );
+            assert_eq!(
+                serde_json::from_value::<SessionScalar>(
+                    json!({ "type": "decimal", "value": value })
+                )
+                .unwrap(),
+                scalar
+            );
+        }
+
+        for value in ["", "+1", "01", "-0", "-0.0", ".1", "1.", "1e2", " 1", "1 "] {
+            assert!(
+                serde_json::from_value::<SessionScalar>(
+                    json!({ "type": "decimal", "value": value })
+                )
+                .is_err()
+            );
+        }
     }
 }

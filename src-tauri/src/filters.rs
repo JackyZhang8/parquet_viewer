@@ -2,19 +2,22 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::AppError;
 use crate::models::{
-    ColumnSchema, FilterCondition, FilterOperator, FilterQueryRequest, SessionScalar, SortDirection,
+    ColumnSchema, FilterCondition, FilterOperator, FilterQueryRequest, SessionScalar,
+    SortDirection, is_canonical_decimal,
 };
 
 pub const MAX_PREVIEW_LIMIT: u32 = 100_000;
+pub const MAX_FILTERS: usize = 100;
+pub const MAX_SELECTED_COLUMNS: usize = 512;
 const MAX_SORTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundValue {
-    Null,
     Bool(bool),
     SignedInteger(i64),
     UnsignedInteger(u64),
     Float(f64),
+    Decimal(String),
     String(String),
 }
 
@@ -24,6 +27,8 @@ pub struct CompiledQuery {
     pub params: Vec<BoundValue>,
 }
 
+// TODO(Task 5): exercise every BoundValue and generated DECIMAL cast against DuckDB execution.
+
 pub fn compile_filter_query(
     file_path: &str,
     schema: &[ColumnSchema],
@@ -31,6 +36,12 @@ pub fn compile_filter_query(
 ) -> Result<CompiledQuery, AppError> {
     if !(1..=MAX_PREVIEW_LIMIT).contains(&request.preview_limit) {
         return invalid("Preview limit must be between 1 and 100000");
+    }
+    if request.filters.len() > MAX_FILTERS {
+        return invalid("At most 100 filter conditions are allowed");
+    }
+    if request.selected_columns.len() > MAX_SELECTED_COLUMNS {
+        return invalid("At most 512 selected columns are allowed");
     }
     if request.sorts.len() > MAX_SORTS {
         return invalid("At most three sort columns are allowed");
@@ -114,6 +125,7 @@ fn compile_condition(
     params: &mut Vec<BoundValue>,
 ) -> Result<String, AppError> {
     let column = require_column(schema, &condition.column)?;
+    let column_type = ColumnType::parse(&column.logical_type);
     let identifier = quote_identifier(&condition.column);
     match condition.operator {
         FilterOperator::IsNull | FilterOperator::IsNotNull => {
@@ -131,7 +143,7 @@ fn compile_condition(
             let value = condition
                 .value
                 .as_ref()
-                .ok_or_else(|| sql_error("Filter predicate requires a value"))?;
+                .ok_or_else(|| argument_error("Filter predicate requires a value"))?;
             if matches!(value, SessionScalar::Null) {
                 return match operator {
                     FilterOperator::Eq => Ok(format!("{identifier} IS NULL")),
@@ -139,18 +151,26 @@ fn compile_condition(
                     _ => invalid("Null is only valid with equality operators"),
                 };
             }
-            validate_operator(column, operator)?;
-            let bound = bind_value(column, value)?;
+            validate_operator(column_type, operator)?;
+            let bound = bind_value(column_type, value)?;
+            let placeholder = match column_type {
+                ColumnType::Decimal { precision, scale } => {
+                    format!("CAST(? AS DECIMAL({precision}, {scale}))")
+                }
+                _ => "?".into(),
+            };
             let predicate = match operator {
-                FilterOperator::Eq => format!("{identifier} = ?"),
-                FilterOperator::NotEq => format!("{identifier} != ?"),
-                FilterOperator::Lt => format!("{identifier} < ?"),
-                FilterOperator::Lte => format!("{identifier} <= ?"),
-                FilterOperator::Gt => format!("{identifier} > ?"),
-                FilterOperator::Gte => format!("{identifier} >= ?"),
-                FilterOperator::Contains => format!("contains({identifier}, ?)"),
-                FilterOperator::StartsWith => format!("starts_with({identifier}, ?)"),
-                FilterOperator::EndsWith => format!("ends_with({identifier}, ?)"),
+                FilterOperator::Eq => format!("{identifier} = {placeholder}"),
+                FilterOperator::NotEq => format!("{identifier} != {placeholder}"),
+                FilterOperator::Lt => format!("{identifier} < {placeholder}"),
+                FilterOperator::Lte => format!("{identifier} <= {placeholder}"),
+                FilterOperator::Gt => format!("{identifier} > {placeholder}"),
+                FilterOperator::Gte => format!("{identifier} >= {placeholder}"),
+                FilterOperator::Contains => format!("contains({identifier}, {placeholder})"),
+                FilterOperator::StartsWith => {
+                    format!("starts_with({identifier}, {placeholder})")
+                }
+                FilterOperator::EndsWith => format!("ends_with({identifier}, {placeholder})"),
                 FilterOperator::IsNull | FilterOperator::IsNotNull => unreachable!(),
             };
             params.push(bound);
@@ -159,23 +179,23 @@ fn compile_condition(
     }
 }
 
-fn validate_operator(column: &ColumnSchema, operator: FilterOperator) -> Result<(), AppError> {
-    let kind = logical_kind(&column.logical_type);
+fn validate_operator(kind: ColumnType, operator: FilterOperator) -> Result<(), AppError> {
     let valid = match operator {
         FilterOperator::Contains | FilterOperator::StartsWith | FilterOperator::EndsWith => {
-            kind == LogicalKind::Text
+            kind == ColumnType::Text
         }
         FilterOperator::Lt | FilterOperator::Lte | FilterOperator::Gt | FilterOperator::Gte => {
             matches!(
                 kind,
-                LogicalKind::Signed
-                    | LogicalKind::Unsigned
-                    | LogicalKind::Float
-                    | LogicalKind::Text
-                    | LogicalKind::Temporal
+                ColumnType::SignedInteger
+                    | ColumnType::UnsignedInteger
+                    | ColumnType::Float
+                    | ColumnType::Decimal { .. }
+                    | ColumnType::Text
+                    | ColumnType::Temporal
             )
         }
-        FilterOperator::Eq | FilterOperator::NotEq => kind != LogicalKind::Unsupported,
+        FilterOperator::Eq | FilterOperator::NotEq => kind != ColumnType::Unsupported,
         FilterOperator::IsNull | FilterOperator::IsNotNull => true,
     };
     if valid {
@@ -185,34 +205,47 @@ fn validate_operator(column: &ColumnSchema, operator: FilterOperator) -> Result<
     }
 }
 
-fn bind_value(column: &ColumnSchema, value: &SessionScalar) -> Result<BoundValue, AppError> {
-    match (logical_kind(&column.logical_type), value) {
-        (LogicalKind::Bool, SessionScalar::Boolean(value)) => Ok(BoundValue::Bool(*value)),
-        (LogicalKind::Signed, SessionScalar::Integer(value)) => value
+fn bind_value(column_type: ColumnType, value: &SessionScalar) -> Result<BoundValue, AppError> {
+    match (column_type, value) {
+        (ColumnType::Boolean, SessionScalar::Boolean(value)) => Ok(BoundValue::Bool(*value)),
+        (ColumnType::SignedInteger, SessionScalar::Integer(value)) => value
             .parse::<i64>()
             .map(BoundValue::SignedInteger)
-            .map_err(|_| sql_error("Integer value is outside the supported signed range")),
-        (LogicalKind::Unsigned, SessionScalar::Integer(value)) => value
+            .map_err(|_| argument_error("Integer value is outside the supported signed range")),
+        (ColumnType::UnsignedInteger, SessionScalar::Integer(value)) => value
             .parse::<u64>()
             .map(BoundValue::UnsignedInteger)
-            .map_err(|_| sql_error("Integer value is outside the supported unsigned range")),
-        (LogicalKind::Float, SessionScalar::Integer(value)) => {
+            .map_err(|_| argument_error("Integer value is outside the supported unsigned range")),
+        (ColumnType::Float, SessionScalar::Integer(value)) => {
             if value.starts_with('-') {
                 value
                     .parse::<i64>()
                     .map(BoundValue::SignedInteger)
-                    .map_err(|_| sql_error("Integer value is outside the supported signed range"))
+                    .map_err(|_| {
+                        argument_error("Integer value is outside the supported signed range")
+                    })
             } else {
                 value
                     .parse::<u64>()
                     .map(BoundValue::UnsignedInteger)
-                    .map_err(|_| sql_error("Integer value is outside the supported unsigned range"))
+                    .map_err(|_| {
+                        argument_error("Integer value is outside the supported unsigned range")
+                    })
             }
         }
-        (LogicalKind::Float, SessionScalar::Number(value)) if value.is_finite() => {
+        (ColumnType::Float, SessionScalar::Number(value)) if value.is_finite() => {
             Ok(BoundValue::Float(*value))
         }
-        (LogicalKind::Text | LogicalKind::Temporal, SessionScalar::String(value)) => {
+        (ColumnType::Decimal { precision, scale }, SessionScalar::Decimal(value)) => {
+            validate_decimal(value, precision, scale)?;
+            Ok(BoundValue::Decimal(value.clone()))
+        }
+        (ColumnType::Decimal { precision, scale }, SessionScalar::Integer(value)) => {
+            validate_integer_scalar(value)?;
+            validate_decimal(value, precision, scale)?;
+            Ok(BoundValue::Decimal(value.clone()))
+        }
+        (ColumnType::Text | ColumnType::Temporal, SessionScalar::String(value)) => {
             Ok(BoundValue::String(value.to_string()))
         }
         _ => invalid("Filter value is incompatible with the column type"),
@@ -226,383 +259,119 @@ fn require_column<'a>(
     schema
         .get(name)
         .copied()
-        .ok_or_else(|| sql_error("Filter query references an unknown column"))
+        .ok_or_else(|| argument_error("Filter query references an unknown column"))
 }
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LogicalKind {
-    Bool,
-    Signed,
-    Unsigned,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnType {
+    Boolean,
+    SignedInteger,
+    UnsignedInteger,
     Float,
+    Decimal { precision: u8, scale: u8 },
     Text,
     Temporal,
     Unsupported,
 }
 
-fn logical_kind(logical_type: &str) -> LogicalKind {
-    let upper = logical_type.to_ascii_uppercase();
-    if upper.contains("BOOL") {
-        LogicalKind::Bool
-    } else if upper.contains("UTF8")
-        || upper.contains("STRING")
-        || upper.contains("VARCHAR")
-        || upper.contains("CHAR")
-    {
-        LogicalKind::Text
-    } else if upper.contains("TIMESTAMP") || upper.contains("DATE") || upper.contains("TIME") {
-        LogicalKind::Temporal
-    } else if upper.contains("FLOAT") || upper.contains("DOUBLE") || upper.contains("DECIMAL") {
-        LogicalKind::Float
-    } else if upper.contains("UINT")
-        || upper.contains("UNSIGNED")
-        || (upper.contains("INTEGER") && upper.contains("IS_SIGNED: FALSE"))
-    {
-        LogicalKind::Unsigned
-    } else if upper.contains("INT") {
-        LogicalKind::Signed
+impl ColumnType {
+    fn parse(logical_type: &str) -> Self {
+        match logical_type {
+            "BOOLEAN" => Self::Boolean,
+            "STRING" | "UTF8" | "VARCHAR" | "CHAR" => Self::Text,
+            "DATE" | "TIME_MILLIS" | "TIME_MICROS" | "TIME_NANOS" | "TIMESTAMP_MILLIS"
+            | "TIMESTAMP_MICROS" | "TIMESTAMP_NANOS" | "INT96" => Self::Temporal,
+            "INT8" | "INT16" | "INT32" | "INT64" => Self::SignedInteger,
+            "UINT8" | "UINT16" | "UINT32" | "UINT64" => Self::UnsignedInteger,
+            "FLOAT" | "DOUBLE" => Self::Float,
+            _ => parse_decimal_type(logical_type)
+                .or_else(|| parse_integer_type(logical_type))
+                .or_else(|| parse_time_type(logical_type))
+                .unwrap_or(Self::Unsupported),
+        }
+    }
+}
+
+fn parse_decimal_type(logical_type: &str) -> Option<ColumnType> {
+    let values = logical_type.strip_prefix("DECIMAL(")?.strip_suffix(')')?;
+    let (precision, scale) = values.split_once(',')?;
+    let precision = precision.parse::<u8>().ok()?;
+    let scale = scale.parse::<u8>().ok()?;
+    (precision > 0 && precision <= 38 && scale <= precision)
+        .then_some(ColumnType::Decimal { precision, scale })
+}
+
+fn parse_integer_type(logical_type: &str) -> Option<ColumnType> {
+    let values = logical_type
+        .strip_prefix("INTEGER { BIT_WIDTH: ")?
+        .strip_suffix(" }")?;
+    let (bit_width, signed) = values.split_once(", IS_SIGNED: ")?;
+    let bit_width = bit_width.parse::<u8>().ok()?;
+    if !matches!(bit_width, 8 | 16 | 32 | 64) {
+        return None;
+    }
+    match signed {
+        "TRUE" => Some(ColumnType::SignedInteger),
+        "FALSE" => Some(ColumnType::UnsignedInteger),
+        _ => None,
+    }
+}
+
+fn parse_time_type(logical_type: &str) -> Option<ColumnType> {
+    let values = logical_type
+        .strip_prefix("TIME { IS_ADJUSTED_TO_U_T_C: ")?
+        .strip_suffix(" }")?;
+    let (adjusted, unit) = values.split_once(", UNIT: ")?;
+    if matches!(adjusted, "TRUE" | "FALSE") && matches!(unit, "MILLIS" | "MICROS" | "NANOS") {
+        Some(ColumnType::Temporal)
     } else {
-        LogicalKind::Unsupported
+        None
+    }
+}
+
+fn validate_decimal(value: &str, precision: u8, scale: u8) -> Result<(), AppError> {
+    if !is_canonical_decimal(value) {
+        return invalid("Decimal value must use canonical decimal syntax");
+    }
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    let (integer, fraction) = unsigned
+        .split_once('.')
+        .map_or((unsigned, ""), |(integer, fraction)| (integer, fraction));
+    let integer_digits = if integer == "0" { 0 } else { integer.len() };
+    let fraction_digits = fraction.len();
+    if integer_digits > usize::from(precision - scale)
+        || fraction_digits > usize::from(scale)
+        || integer_digits + fraction_digits > usize::from(precision)
+    {
+        return invalid("Decimal value exceeds the column precision or scale");
+    }
+    Ok(())
+}
+
+fn validate_integer_scalar(value: &str) -> Result<(), AppError> {
+    let valid = if value.starts_with('-') {
+        value.parse::<i64>().is_ok()
+    } else {
+        value.parse::<u64>().is_ok()
+    };
+    if valid {
+        Ok(())
+    } else {
+        invalid("Integer value is outside the supported i64/u64 range")
     }
 }
 
 fn invalid<T>(message: &str) -> Result<T, AppError> {
-    Err(sql_error(message))
+    Err(argument_error(message))
 }
-fn sql_error(message: &str) -> AppError {
-    AppError::Sql(message.into())
+fn argument_error(message: &str) -> AppError {
+    AppError::InvalidArgument(message.into())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{BoundValue, compile_filter_query};
-    use crate::error::AppError;
-    use crate::models::{
-        ColumnSchema, FilterCondition, FilterOperator, FilterQueryRequest, SessionScalar,
-        SortDirection, SortSpec,
-    };
-    use serde_json::json;
-
-    fn column(name: &str, logical_type: &str) -> ColumnSchema {
-        ColumnSchema {
-            name: name.into(),
-            logical_type: logical_type.into(),
-            nullable: true,
-        }
-    }
-
-    fn request() -> FilterQueryRequest {
-        FilterQueryRequest {
-            selected_columns: Vec::new(),
-            filters: Vec::new(),
-            sorts: Vec::new(),
-            preview_limit: 100,
-        }
-    }
-
-    fn filter(column: &str, operator: FilterOperator, value: SessionScalar) -> FilterCondition {
-        FilterCondition {
-            column: column.into(),
-            operator,
-            value: Some(value),
-        }
-    }
-
-    #[test]
-    fn compiles_empty_request_and_binds_path_then_limit() {
-        let compiled = compile_filter_query("/private/data.parquet", &[], &request()).unwrap();
-        assert_eq!(compiled.sql, "SELECT * FROM read_parquet(?) LIMIT ?");
-        assert_eq!(
-            compiled.params,
-            vec![
-                BoundValue::String("/private/data.parquet".into()),
-                BoundValue::UnsignedInteger(100),
-            ]
-        );
-    }
-
-    #[test]
-    fn compiles_typed_predicates_and_preserves_parameter_order() {
-        let schema = [
-            column("status", "UTF8"),
-            column("amount", "INT64"),
-            column("active", "BOOLEAN"),
-        ];
-        let mut request = request();
-        request.filters = vec![
-            filter(
-                "status",
-                FilterOperator::Eq,
-                SessionScalar::String("paid".into()),
-            ),
-            filter(
-                "amount",
-                FilterOperator::Gte,
-                SessionScalar::Integer(i64::MIN.to_string()),
-            ),
-            filter("active", FilterOperator::Eq, SessionScalar::Boolean(true)),
-        ];
-
-        let compiled = compile_filter_query("file.parquet", &schema, &request).unwrap();
-        assert_eq!(
-            compiled.sql,
-            "SELECT * FROM read_parquet(?) WHERE \"status\" = ? AND \"amount\" >= ? AND \"active\" = ? LIMIT ?"
-        );
-        assert_eq!(
-            compiled.params,
-            vec![
-                BoundValue::String("file.parquet".into()),
-                BoundValue::String("paid".into()),
-                BoundValue::SignedInteger(i64::MIN),
-                BoundValue::Bool(true),
-                BoundValue::UnsignedInteger(100),
-            ]
-        );
-    }
-
-    #[test]
-    fn compiles_null_and_text_function_predicates() {
-        let schema = [column("note", "STRING")];
-        let mut request = request();
-        request.filters = vec![
-            FilterCondition {
-                column: "note".into(),
-                operator: FilterOperator::IsNull,
-                value: None,
-            },
-            filter(
-                "note",
-                FilterOperator::Contains,
-                SessionScalar::String("%_".into()),
-            ),
-            filter(
-                "note",
-                FilterOperator::StartsWith,
-                SessionScalar::String("a".into()),
-            ),
-            filter(
-                "note",
-                FilterOperator::EndsWith,
-                SessionScalar::String("z".into()),
-            ),
-        ];
-        let compiled = compile_filter_query("file", &schema, &request).unwrap();
-        assert_eq!(
-            compiled.sql,
-            "SELECT * FROM read_parquet(?) WHERE \"note\" IS NULL AND contains(\"note\", ?) AND starts_with(\"note\", ?) AND ends_with(\"note\", ?) LIMIT ?"
-        );
-        assert_eq!(compiled.params.len(), 5);
-    }
-
-    #[test]
-    fn quotes_special_identifiers_and_compiles_three_sorts() {
-        let schema = [
-            column("order value", "DOUBLE"),
-            column("say\"what", "VARCHAR"),
-            column("created_at", "TIMESTAMP"),
-        ];
-        let mut request = request();
-        request.selected_columns = vec!["order value".into(), "say\"what".into()];
-        request.sorts = vec![
-            SortSpec {
-                column: "created_at".into(),
-                direction: SortDirection::Desc,
-            },
-            SortSpec {
-                column: "order value".into(),
-                direction: SortDirection::Asc,
-            },
-            SortSpec {
-                column: "say\"what".into(),
-                direction: SortDirection::Desc,
-            },
-        ];
-        let compiled = compile_filter_query("file", &schema, &request).unwrap();
-        assert_eq!(
-            compiled.sql,
-            "SELECT \"order value\", \"say\"\"what\" FROM read_parquet(?) ORDER BY \"created_at\" DESC, \"order value\" ASC, \"say\"\"what\" DESC LIMIT ?"
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_and_duplicate_columns_and_fourth_sort() {
-        let schema = [column("a", "INT32"), column("b", "INT32")];
-        let mut unknown = request();
-        unknown.selected_columns = vec!["missing".into()];
-        assert!(
-            matches!(compile_filter_query("secret", &schema, &unknown), Err(AppError::Sql(message)) if !message.contains("secret"))
-        );
-
-        let mut duplicate = request();
-        duplicate.selected_columns = vec!["a".into(), "a".into()];
-        assert!(compile_filter_query("file", &schema, &duplicate).is_err());
-
-        let mut duplicate_sort = request();
-        duplicate_sort.sorts = vec![
-            SortSpec {
-                column: "a".into(),
-                direction: SortDirection::Asc,
-            },
-            SortSpec {
-                column: "a".into(),
-                direction: SortDirection::Desc,
-            },
-        ];
-        assert!(compile_filter_query("file", &schema, &duplicate_sort).is_err());
-
-        let mut too_many = request();
-        too_many.sorts = (0..4)
-            .map(|_| SortSpec {
-                column: "a".into(),
-                direction: SortDirection::Asc,
-            })
-            .collect();
-        assert!(compile_filter_query("file", &schema, &too_many).is_err());
-    }
-
-    #[test]
-    fn rejects_operator_type_and_value_mismatches() {
-        let schema = [
-            column("flag", "BOOLEAN"),
-            column("count", "UINT64"),
-            column("text", "UTF8"),
-        ];
-        let cases = [
-            filter(
-                "flag",
-                FilterOperator::Contains,
-                SessionScalar::String("x".into()),
-            ),
-            filter(
-                "count",
-                FilterOperator::Eq,
-                SessionScalar::String("1".into()),
-            ),
-            filter("text", FilterOperator::Eq, SessionScalar::Boolean(true)),
-            filter(
-                "count",
-                FilterOperator::Eq,
-                SessionScalar::Integer("-1".into()),
-            ),
-            filter(
-                "count",
-                FilterOperator::Eq,
-                SessionScalar::Integer("18446744073709551616".into()),
-            ),
-        ];
-        for condition in cases {
-            let mut request = request();
-            request.filters.push(condition);
-            assert!(compile_filter_query("file", &schema, &request).is_err());
-        }
-    }
-
-    #[test]
-    fn rewrites_explicit_null_equality_and_rejects_values_on_null_predicates() {
-        let schema = [column("a", "INT64")];
-        let mut request = request();
-        request.filters = vec![
-            filter("a", FilterOperator::Eq, SessionScalar::Null),
-            filter("a", FilterOperator::NotEq, SessionScalar::Null),
-        ];
-        let compiled = compile_filter_query("file", &schema, &request).unwrap();
-        assert_eq!(
-            compiled.sql,
-            "SELECT * FROM read_parquet(?) WHERE \"a\" IS NULL AND \"a\" IS NOT NULL LIMIT ?"
-        );
-        assert_eq!(compiled.params.len(), 2);
-
-        request.filters = vec![filter("a", FilterOperator::IsNull, SessionScalar::Null)];
-        assert!(compile_filter_query("file", &schema, &request).is_err());
-    }
-
-    #[test]
-    fn malicious_value_is_only_a_bound_parameter() {
-        let schema = [column("status", "VARCHAR")];
-        let attack = "' OR 1=1 --";
-        let mut request = request();
-        request.filters = vec![filter(
-            "status",
-            FilterOperator::Eq,
-            SessionScalar::String(attack.into()),
-        )];
-        let compiled = compile_filter_query("file", &schema, &request).unwrap();
-        assert!(!compiled.sql.contains(attack));
-        assert_eq!(compiled.params[1], BoundValue::String(attack.into()));
-    }
-
-    #[test]
-    fn rejects_preview_limits_outside_documented_bounds() {
-        for preview_limit in [0, 100_001] {
-            let mut request = request();
-            request.preview_limit = preview_limit;
-            assert!(compile_filter_query("file", &[], &request).is_err());
-        }
-    }
-
-    #[test]
-    fn public_dtos_have_strict_camel_case_serde_shapes() {
-        let condition = FilterCondition {
-            column: "created_at".into(),
-            operator: FilterOperator::StartsWith,
-            value: Some(SessionScalar::String("2026".into())),
-        };
-        assert_eq!(
-            serde_json::to_value(condition).unwrap(),
-            json!({
-                "column": "created_at", "operator": "startsWith", "value": { "type": "string", "value": "2026" }
-            })
-        );
-        assert_eq!(
-            serde_json::to_value(SortDirection::Desc).unwrap(),
-            json!("desc")
-        );
-        let request = FilterQueryRequest {
-            selected_columns: vec!["created_at".into()],
-            filters: vec![],
-            sorts: vec![SortSpec {
-                column: "created_at".into(),
-                direction: SortDirection::Desc,
-            }],
-            preview_limit: 50,
-        };
-        assert_eq!(
-            serde_json::to_value(request).unwrap(),
-            json!({
-                "selectedColumns": ["created_at"],
-                "filters": [],
-                "sorts": [{ "column": "created_at", "direction": "desc" }],
-                "previewLimit": 50
-            })
-        );
-        assert!(serde_json::from_value::<FilterOperator>(json!("raw sql")).is_err());
-    }
-
-    #[test]
-    fn binds_unsigned_logical_integer_and_decimal_u64_boundary() {
-        let schema = [
-            column("unsigned", "INTEGER { BIT_WIDTH: 64, IS_SIGNED: FALSE }"),
-            column("decimal", "DECIMAL(20,0)"),
-        ];
-        let mut request = request();
-        request.filters = vec![
-            filter(
-                "unsigned",
-                FilterOperator::Eq,
-                SessionScalar::Integer(u64::MAX.to_string()),
-            ),
-            filter(
-                "decimal",
-                FilterOperator::Eq,
-                SessionScalar::Integer(u64::MAX.to_string()),
-            ),
-        ];
-        let compiled = compile_filter_query("file", &schema, &request).unwrap();
-        assert_eq!(compiled.params[1], BoundValue::UnsignedInteger(u64::MAX));
-        assert_eq!(compiled.params[2], BoundValue::UnsignedInteger(u64::MAX));
-    }
-}
+#[path = "filters/tests.rs"]
+mod tests;

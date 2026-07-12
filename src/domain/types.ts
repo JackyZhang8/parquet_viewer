@@ -1,4 +1,5 @@
 export type AppErrorCode =
+  | 'INVALID_ARGUMENT'
   | 'INVALID_PATH'
   | 'PERMISSION_DENIED'
   | 'INVALID_PARQUET'
@@ -50,7 +51,7 @@ export interface QueryBatch {
   elapsedMs: string
 }
 
-export type FilterOperator =
+export type ValueFilterOperator =
   | 'eq'
   | 'notEq'
   | 'lt'
@@ -60,14 +61,20 @@ export type FilterOperator =
   | 'contains'
   | 'startsWith'
   | 'endsWith'
-  | 'isNull'
-  | 'isNotNull'
 
-export interface FilterCondition {
-  column: string
-  operator: FilterOperator
-  value?: SessionScalar
-}
+export type FilterOperator = ValueFilterOperator | 'isNull' | 'isNotNull'
+
+export type FilterCondition =
+  | {
+      column: string
+      operator: ValueFilterOperator
+      value: SessionScalar
+    }
+  | {
+      column: string
+      operator: 'isNull' | 'isNotNull'
+      value?: never
+    }
 
 export interface SortSpec {
   column: string
@@ -131,11 +138,13 @@ export type SessionScalar =
   | { type: 'boolean'; value: boolean }
   | { type: 'number'; value: number }
   | { type: 'integer'; value: string }
+  | { type: 'decimal'; value: string }
   | { type: 'string'; value: string }
 
 const I64_MIN = -(1n << 63n)
 const U64_MAX = (1n << 64n) - 1n
 const CANONICAL_INTEGER = /^(?:0|-[1-9]\d*|[1-9]\d*)$/
+const CANONICAL_DECIMAL = /^(?:0|[1-9]\d*)(?:\.\d+)?$|^-(?:0\.(?!0+$)\d+|[1-9]\d*(?:\.\d+)?)$/
 
 const isCanonicalSessionInteger = (value: string): boolean => {
   if (!CANONICAL_INTEGER.test(value)) return false
@@ -151,6 +160,13 @@ export const sessionInteger = (value: string): SessionScalar => {
     throw new Error('Session integer is outside the supported i64/u64 range')
   }
   return { type: 'integer', value }
+}
+
+export const sessionDecimal = (value: string): SessionScalar => {
+  if (!CANONICAL_DECIMAL.test(value)) {
+    throw new Error('Session decimal must use canonical decimal syntax')
+  }
+  return { type: 'decimal', value }
 }
 
 export const sessionScalarFromNumber = (value: number): SessionScalar => {
@@ -189,6 +205,12 @@ export const isSessionScalar = (value: unknown): value is SessionScalar => {
         typeof value.value === 'string' &&
         isCanonicalSessionInteger(value.value)
       )
+    case 'decimal':
+      return (
+        hasExactKeys(value, ['type', 'value']) &&
+        typeof value.value === 'string' &&
+        CANONICAL_DECIMAL.test(value.value)
+      )
     case 'string':
       return hasExactKeys(value, ['type', 'value']) && typeof value.value === 'string'
     default:
@@ -209,6 +231,7 @@ export interface SessionViewState {
 }
 
 const APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
+  'INVALID_ARGUMENT',
   'INVALID_PATH',
   'PERMISSION_DENIED',
   'INVALID_PARQUET',

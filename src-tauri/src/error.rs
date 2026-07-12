@@ -4,6 +4,8 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("{0}")]
+    InvalidArgument(String),
+    #[error("{0}")]
     InvalidPath(String),
     #[error("{0}")]
     PermissionDenied(String),
@@ -24,6 +26,7 @@ pub enum AppError {
 impl AppError {
     fn code(&self) -> &'static str {
         match self {
+            Self::InvalidArgument(_) => "INVALID_ARGUMENT",
             Self::InvalidPath(_) => "INVALID_PATH",
             Self::PermissionDenied(_) => "PERMISSION_DENIED",
             Self::InvalidParquet(_) => "INVALID_PARQUET",
@@ -37,7 +40,8 @@ impl AppError {
 
     fn message(&self) -> &str {
         match self {
-            Self::InvalidPath(message)
+            Self::InvalidArgument(message)
+            | Self::InvalidPath(message)
             | Self::PermissionDenied(message)
             | Self::InvalidParquet(message)
             | Self::StaleFile(message)
@@ -84,6 +88,10 @@ mod tests {
     #[test]
     fn every_error_variant_has_a_stable_code_and_null_detail() {
         let cases = [
+            (
+                AppError::InvalidArgument("message".into()),
+                "INVALID_ARGUMENT",
+            ),
             (AppError::InvalidPath("message".into()), "INVALID_PATH"),
             (
                 AppError::PermissionDenied("message".into()),
@@ -121,6 +129,20 @@ mod tests {
             json!({
                 "code": "INTERNAL_ERROR",
                 "message": "An internal error occurred",
+                "detail": null
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_argument_has_a_stable_public_shape() {
+        let error = AppError::InvalidArgument("Invalid filter value".into());
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "code": "INVALID_ARGUMENT",
+                "message": "Invalid filter value",
                 "detail": null
             })
         );

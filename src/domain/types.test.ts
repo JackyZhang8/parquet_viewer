@@ -4,9 +4,23 @@ import {
   isAppError,
   isQueryBatch,
   isSessionScalar,
+  sessionDecimal,
   sessionInteger,
   sessionScalarFromNumber,
 } from './types'
+import type { FilterCondition } from './types'
+
+const nullFilter = { column: 'deleted_at', operator: 'isNull' } satisfies FilterCondition
+const valueFilter = {
+  column: 'status',
+  operator: 'eq',
+  value: { type: 'string', value: 'paid' },
+} satisfies FilterCondition
+// @ts-expect-error Null predicates cannot carry a value.
+const invalidNullFilter: FilterCondition = { column: 'deleted_at', operator: 'isNull', value: { type: 'null' } }
+// @ts-expect-error Value predicates require a scalar.
+const invalidValueFilter: FilterCondition = { column: 'status', operator: 'eq' }
+void [nullFilter, valueFilter, invalidNullFilter, invalidValueFilter]
 
 describe('IPC runtime guards', () => {
   it('accepts the stable public error shape and rejects debug-shaped errors', () => {
@@ -18,6 +32,19 @@ describe('IPC runtime guards', () => {
       }),
     ).toBe(true)
     expect(isAppError({ code: 'INTERNAL_ERROR', debug: '/private/file.parquet' })).toBe(false)
+  })
+
+  it('validates canonical exact decimal scalar strings', () => {
+    expect(sessionDecimal('-123.45')).toEqual({ type: 'decimal', value: '-123.45' })
+    expect(isSessionScalar({ type: 'decimal', value: '0.001' })).toBe(true)
+    for (const value of ['', '+1', '01', '-0', '-0.0', '.1', '1.', '1e2', ' 1']) {
+      expect(() => sessionDecimal(value)).toThrow(/decimal/i)
+      expect(isSessionScalar({ type: 'decimal', value })).toBe(false)
+    }
+  })
+
+  it('accepts INVALID_ARGUMENT as a public error code', () => {
+    expect(isAppError({ code: 'INVALID_ARGUMENT', message: 'Invalid filter', detail: null })).toBe(true)
   })
 
   it('accepts precision-safe query batches and rejects numeric counters', () => {
