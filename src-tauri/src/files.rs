@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io;
+use std::fs::{self, File, Metadata, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -12,6 +12,12 @@ use parquet::schema::types::Type as SchemaType;
 use tauri::State;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
 use crate::error::AppError;
 use crate::models::{ColumnSchema, FileMetadata};
 
@@ -20,7 +26,23 @@ struct FileFingerprint {
     canonical_path: PathBuf,
     size: u64,
     modified: SystemTime,
+    identity: FileIdentity,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileIdentity {
+    #[cfg(unix)]
+    Unix { device: u64, inode: u64 },
+    #[cfg(windows)]
+    Windows {
+        volume_serial_number: Option<u32>,
+        file_index: Option<u64>,
+    },
+    #[cfg(not(any(unix, windows)))]
+    Unavailable,
+}
+
+const MAX_FOOTER_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct RegistryEntry {
@@ -132,7 +154,9 @@ impl FileRegistry {
             .get(file_id)
             .map(|entry| entry.fingerprint.clone())
             .ok_or_else(|| AppError::InvalidPath("Unknown file ID".into()))?;
-        Ok(fingerprint(&registered.canonical_path)? != registered)
+        let file = open_regular_file(&registered.canonical_path)?;
+        let current = fingerprint_from_open_file(&registered.canonical_path, &file)?;
+        Ok(current != registered)
     }
 }
 
@@ -175,8 +199,9 @@ pub fn read_metadata(path: &Path, file_id: String) -> Result<FileMetadata, AppEr
 }
 
 fn load_file(canonical_path: &Path, file_id: String) -> Result<LoadedFile, AppError> {
-    let fingerprint = fingerprint(canonical_path)?;
-    let file = File::open(canonical_path).map_err(|error| map_io_error(error, canonical_path))?;
+    let mut file = open_regular_file(canonical_path)?;
+    let fingerprint = fingerprint_from_open_file(canonical_path, &file)?;
+    validate_footer(&mut file, fingerprint.size)?;
     // SerializedFileReader construction parses the footer metadata. No row-group, page,
     // column, or record reader is created by this metadata-only path.
     let reader = SerializedFileReader::new(file)
@@ -187,6 +212,9 @@ fn load_file(canonical_path: &Path, file_id: String) -> Result<LoadedFile, AppEr
         .map_err(|_| AppError::InvalidParquet("Parquet row count is invalid".into()))?;
     let row_group_count = u32::try_from(parquet_metadata.num_row_groups())
         .map_err(|_| AppError::ResourceExhausted("Too many Parquet row groups".into()))?;
+    // The MVP wire contract intentionally reports only top-level Parquet fields. Nested
+    // children remain represented by their parent display type until recursive schemas
+    // are introduced as a separate, compatible API change.
     let columns = file_metadata
         .schema_descr()
         .root_schema()
@@ -198,15 +226,19 @@ fn load_file(canonical_path: &Path, file_id: String) -> Result<LoadedFile, AppEr
             nullable: field.is_optional(),
         })
         .collect();
+    let canonical_path_text = canonical_path
+        .to_str()
+        .ok_or_else(|| AppError::InvalidPath("File path is not valid UTF-8".into()))?;
     let name = canonical_path
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| canonical_path.to_string_lossy().into_owned());
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::InvalidPath("File name is not valid UTF-8".into()))?
+        .to_owned();
 
     Ok(LoadedFile {
         metadata: FileMetadata {
             file_id,
-            path: canonical_path.to_string_lossy().into_owned(),
+            path: canonical_path_text.to_owned(),
             name,
             size_bytes: fingerprint.size,
             row_count,
@@ -219,19 +251,36 @@ fn load_file(canonical_path: &Path, file_id: String) -> Result<LoadedFile, AppEr
 
 fn canonical_file_path(path: &Path) -> Result<PathBuf, AppError> {
     let canonical = fs::canonicalize(path).map_err(|error| map_io_error(error, path))?;
-    let metadata = fs::metadata(&canonical).map_err(|error| map_io_error(error, &canonical))?;
-    if !metadata.is_file() {
-        return Err(AppError::InvalidPath("Path is not a file".into()));
-    }
+    canonical
+        .to_str()
+        .ok_or_else(|| AppError::InvalidPath("File path is not valid UTF-8".into()))?;
     Ok(canonical)
 }
 
-fn fingerprint(canonical_path: &Path) -> Result<FileFingerprint, AppError> {
-    let metadata =
-        fs::metadata(canonical_path).map_err(|error| map_io_error(error, canonical_path))?;
+fn open_regular_file(canonical_path: &Path) -> Result<File, AppError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let file = options
+        .open(canonical_path)
+        .map_err(|error| map_io_error(error, canonical_path))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| map_io_error(error, canonical_path))?;
     if !metadata.is_file() {
         return Err(AppError::InvalidPath("Path is not a file".into()));
     }
+    Ok(file)
+}
+
+fn fingerprint_from_open_file(
+    canonical_path: &Path,
+    file: &File,
+) -> Result<FileFingerprint, AppError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| map_io_error(error, canonical_path))?;
     let modified = metadata
         .modified()
         .map_err(|error| map_io_error(error, canonical_path))?;
@@ -239,7 +288,64 @@ fn fingerprint(canonical_path: &Path) -> Result<FileFingerprint, AppError> {
         canonical_path: canonical_path.to_owned(),
         size: metadata.len(),
         modified,
+        identity: file_identity(&metadata),
     })
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &Metadata) -> FileIdentity {
+    FileIdentity::Unix {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+#[cfg(windows)]
+fn file_identity(metadata: &Metadata) -> FileIdentity {
+    FileIdentity::Windows {
+        volume_serial_number: metadata.volume_serial_number(),
+        file_index: metadata.file_index(),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_metadata: &Metadata) -> FileIdentity {
+    FileIdentity::Unavailable
+}
+
+fn validate_footer(file: &mut File, file_size: u64) -> Result<(), AppError> {
+    if file_size < 8 {
+        return Err(AppError::InvalidParquet(
+            "The file has a truncated Parquet footer".into(),
+        ));
+    }
+    file.seek(SeekFrom::End(-8))
+        .map_err(|error| map_io_error(error, Path::new("")))?;
+    let mut footer = [0_u8; 8];
+    file.read_exact(&mut footer)
+        .map_err(|_| AppError::InvalidParquet("The file has a truncated Parquet footer".into()))?;
+    if &footer[4..] != b"PAR1" {
+        return Err(AppError::InvalidParquet(
+            "The file has an invalid Parquet footer".into(),
+        ));
+    }
+    let metadata_length =
+        u32::from_le_bytes(footer[..4].try_into().map_err(|_| {
+            AppError::InvalidParquet("The file has an invalid Parquet footer".into())
+        })?) as u64;
+    if metadata_length > MAX_FOOTER_METADATA_BYTES {
+        return Err(AppError::ResourceExhausted(
+            "Parquet footer metadata exceeds the supported limit".into(),
+        ));
+    }
+    if metadata_length > file_size - 8 {
+        return Err(AppError::InvalidParquet(
+            "The file has an invalid Parquet footer length".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| map_io_error(error, Path::new("")))?;
+    Ok(())
 }
 
 fn map_io_error(error: io::Error, _path: &Path) -> AppError {
