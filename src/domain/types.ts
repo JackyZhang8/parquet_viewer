@@ -88,6 +88,12 @@ export interface FilterQueryRequest {
   previewLimit: number
 }
 
+export interface FilterQueryStartRequest {
+  fileId: string
+  query: FilterQueryRequest
+  batchSize: number
+}
+
 /** Unsafe signed/unsigned integers cross the wire as decimal strings. */
 export type CellValue =
   | null

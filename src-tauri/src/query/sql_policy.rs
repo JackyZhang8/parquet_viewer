@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{Expr, ObjectName, Query, Statement, TableFactor, Visit, Visitor};
+use sqlparser::ast::{
+    Expr, LimitClause, ObjectName, Query, SetExpr, Statement, TableFactor, Visit, Visitor,
+};
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
 
@@ -66,6 +68,20 @@ impl Visitor for PolicyVisitor {
     type Break = String;
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        if !matches!(query.body.as_ref(), SetExpr::Select(_)) {
+            return ControlFlow::Break("Only SELECT query bodies are allowed".into());
+        }
+        if matches!(
+            query.limit_clause.as_ref(),
+            Some(
+                LimitClause::LimitOffset {
+                    offset: Some(_),
+                    ..
+                } | LimitClause::OffsetCommaLimit { .. }
+            )
+        ) {
+            return ControlFlow::Break("OFFSET is not allowed in preview queries".into());
+        }
         if let Some(with) = &query.with {
             self.ctes.extend(
                 with.cte_tables

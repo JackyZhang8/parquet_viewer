@@ -50,9 +50,17 @@ pub struct FilterQueryRequest {
     pub preview_limit: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilterQueryStartRequest {
+    pub file_id: String,
+    pub query: FilterQueryRequest,
+    pub batch_size: u32,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FilterCondition, FilterQueryRequest, SortSpec};
+    use super::{FilterCondition, FilterQueryRequest, FilterQueryStartRequest, SortSpec};
     use serde_json::json;
 
     #[test]
@@ -93,5 +101,18 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn filter_start_request_is_strict_and_camel_case() {
+        let value = json!({
+            "fileId": "file-1",
+            "query": { "selectedColumns": [], "filters": [], "sorts": [], "previewLimit": 100 },
+            "batchSize": 500
+        });
+        assert!(serde_json::from_value::<FilterQueryStartRequest>(value.clone()).is_ok());
+        let mut unknown = value;
+        unknown["sql"] = json!("SELECT secret");
+        assert!(serde_json::from_value::<FilterQueryStartRequest>(unknown).is_err());
     }
 }

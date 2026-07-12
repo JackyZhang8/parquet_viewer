@@ -19,6 +19,7 @@ pub fn run() {
             files::reload_file,
             files::close_file,
             query::start_query,
+            query::start_filter_query,
             query::fetch_query_batch,
             query::cancel_query
         ])

@@ -4,11 +4,17 @@ use crate::files::FileRegistry;
 use crate::filters::{BoundValue, compile_filter_query};
 use crate::models::CellValue;
 use crate::models::{
-    ColumnSchema, FilterCondition, FilterOperator, FilterQueryRequest, QueryRequest, SessionScalar,
+    ColumnSchema, FilterCondition, FilterOperator, FilterQueryRequest, FilterQueryStartRequest,
+    QueryRequest, SessionScalar,
 };
+use arrow_array::{Date32Array, Decimal128Array, RecordBatch, StringArray, UInt64Array};
+use arrow_schema::{DataType, Field, Schema};
 use duckdb::Connection;
 use duckdb::types::Value;
+use parquet::arrow::ArrowWriter;
+use std::fs::File;
 use std::io::Write;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 #[test]
@@ -19,6 +25,26 @@ fn accepts_select_and_cte_over_data() {
     ] {
         assert!(validate_user_sql(sql).is_ok(), "{sql}");
     }
+}
+
+#[test]
+fn rejects_non_select_query_bodies_and_offset_at_any_depth() {
+    for sql in [
+        "VALUES (1)",
+        "TABLE data",
+        "SELECT * FROM data UNION SELECT * FROM data",
+        "SELECT * FROM data OFFSET 1",
+        "SELECT * FROM (SELECT * FROM data OFFSET 1) nested",
+        "WITH nested AS (SELECT * FROM data OFFSET 1) SELECT * FROM nested",
+    ] {
+        assert!(
+            validate_user_sql(sql).is_err(),
+            "accepted forbidden SQL: {sql}"
+        );
+    }
+    assert!(
+        validate_user_sql("WITH filtered AS (SELECT * FROM data) SELECT * FROM filtered").is_ok()
+    );
 }
 
 #[test]
@@ -385,6 +411,194 @@ fn task4_compiled_filters_execute_with_exact_bound_values() {
         .query(duckdb::params_from_iter(params.iter()))
         .unwrap();
     assert!(rows.next().unwrap().is_none());
+}
+
+fn filter_start(file_id: String, query: FilterQueryRequest) -> FilterQueryStartRequest {
+    FilterQueryStartRequest {
+        file_id,
+        query,
+        batch_size: 2,
+    }
+}
+
+#[test]
+fn filter_query_runs_through_service_with_exact_typed_values_and_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("typed-service.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("u", DataType::UInt64, false),
+        Field::new("d", DataType::Decimal128(24, 4), false),
+        Field::new("day", DataType::Date32, false),
+        Field::new("text", DataType::Utf8, false),
+    ]));
+    let decimal = Decimal128Array::from(vec!["123456789012345678901234".parse::<i128>().unwrap()])
+        .with_precision_and_scale(24, 4)
+        .unwrap();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(vec![u64::MAX])),
+            Arc::new(decimal),
+            Arc::new(Date32Array::from(vec![20_646])),
+            Arc::new(StringArray::from(vec!["prefix-middle-suffix"])),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let registry = FileRegistry::default();
+    let metadata = registry.open_paths(vec![path]).remove(0).unwrap();
+    let condition = |column: &str, operator, value| FilterCondition {
+        column: column.into(),
+        operator,
+        value: Some(value),
+    };
+    let query = FilterQueryRequest {
+        selected_columns: vec![],
+        filters: vec![
+            condition(
+                "u",
+                FilterOperator::Eq,
+                SessionScalar::Integer(u64::MAX.to_string()),
+            ),
+            condition(
+                "d",
+                FilterOperator::Eq,
+                SessionScalar::Decimal("12345678901234567890.1234".into()),
+            ),
+            condition(
+                "day",
+                FilterOperator::Eq,
+                SessionScalar::String("2026-07-12".into()),
+            ),
+            condition(
+                "text",
+                FilterOperator::Contains,
+                SessionScalar::String("middle".into()),
+            ),
+            condition(
+                "text",
+                FilterOperator::StartsWith,
+                SessionScalar::String("prefix".into()),
+            ),
+            condition(
+                "text",
+                FilterOperator::EndsWith,
+                SessionScalar::String("suffix".into()),
+            ),
+        ],
+        sorts: vec![],
+        preview_limit: 10,
+    };
+    let service = QueryService::default();
+    let started = service
+        .start_filter_query(filter_start(metadata.file_id.clone(), query), &registry)
+        .unwrap();
+    let batch = service.fetch_query_batch(&started.query_id).unwrap();
+    assert!(batch.done);
+    assert_eq!(batch.rows.len(), 1);
+    assert_eq!(service.active_cursor_count(), 0);
+
+    let attack = "' OR 1=1 --";
+    let malicious = FilterQueryRequest {
+        selected_columns: vec![],
+        filters: vec![condition(
+            "text",
+            FilterOperator::Eq,
+            SessionScalar::String(attack.into()),
+        )],
+        sorts: vec![],
+        preview_limit: 10,
+    };
+    let started = service
+        .start_filter_query(filter_start(metadata.file_id, malicious), &registry)
+        .unwrap();
+    let batch = service.fetch_query_batch(&started.query_id).unwrap();
+    assert!(batch.done);
+    assert!(batch.rows.is_empty());
+    assert_eq!(service.active_cursor_count(), 0);
+}
+
+#[test]
+fn filter_query_service_binds_authoritative_unsigned_schema() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unsigned.parquet");
+    let schema = Arc::new(Schema::new(vec![Field::new("u", DataType::UInt64, false)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(UInt64Array::from(vec![u64::MAX]))],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let registry = FileRegistry::default();
+    let metadata = registry.open_paths(vec![path]).remove(0).unwrap();
+    let query = FilterQueryRequest {
+        selected_columns: vec![],
+        filters: vec![FilterCondition {
+            column: "u".into(),
+            operator: FilterOperator::Eq,
+            value: Some(SessionScalar::Integer(u64::MAX.to_string())),
+        }],
+        sorts: vec![],
+        preview_limit: 10,
+    };
+    let service = QueryService::default();
+    let started = service
+        .start_filter_query(filter_start(metadata.file_id, query), &registry)
+        .unwrap();
+    let batch = service.fetch_query_batch(&started.query_id).unwrap();
+    assert!(batch.done);
+    assert_eq!(batch.rows.len(), 1);
+    assert_eq!(service.active_cursor_count(), 0);
+}
+
+#[test]
+fn filter_query_uses_same_replacement_close_and_stale_lifecycle() {
+    let (directory, registry, file_id) = registered_fixture(20);
+    let service = QueryService::default();
+    let filter = FilterQueryRequest {
+        selected_columns: vec![],
+        filters: vec![],
+        sorts: vec![],
+        preview_limit: 20,
+    };
+    let cancelled = service
+        .start_filter_query(filter_start(file_id.clone(), filter.clone()), &registry)
+        .unwrap();
+    service.cancel_query(&cancelled.query_id).unwrap();
+    assert_eq!(service.active_cursor_count(), 0);
+    let first = service
+        .start_filter_query(filter_start(file_id.clone(), filter.clone()), &registry)
+        .unwrap();
+    let replacement = service
+        .start_query(
+            request(file_id.clone(), "SELECT * FROM data", 1, 20),
+            &registry,
+        )
+        .unwrap();
+    assert!(service.fetch_query_batch(&first.query_id).is_err());
+    service.cancel_query(&replacement.query_id).unwrap();
+    service
+        .start_filter_query(filter_start(file_id.clone(), filter.clone()), &registry)
+        .unwrap();
+    service.close_file(&file_id);
+    assert_eq!(service.active_cursor_count(), 0);
+
+    let path = directory.path().join("rows.parquet");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(b"changed")
+        .unwrap();
+    assert!(matches!(
+        service.start_filter_query(filter_start(file_id, filter), &registry),
+        Err(crate::error::AppError::StaleFile(_))
+    ));
+    assert_eq!(service.active_cursor_count(), 0);
 }
 
 #[test]
