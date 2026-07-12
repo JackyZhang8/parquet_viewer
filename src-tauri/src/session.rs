@@ -64,7 +64,11 @@ impl SessionStore {
         let unavailable_tab_ids = snapshot
             .tabs
             .iter()
-            .filter(|tab| fs::metadata(&tab.path).is_err())
+            .filter(|tab| {
+                fs::metadata(&tab.path)
+                    .map(|metadata| !metadata.is_file())
+                    .unwrap_or(true)
+            })
             .map(|tab| tab.id.clone())
             .collect();
         Ok(RestoredSession {
@@ -81,7 +85,8 @@ impl SessionStore {
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         fs::create_dir_all(parent).map_err(map_write_error)?;
-        let temp = parent.join(format!(".session-{}.tmp", Uuid::new_v4()));
+        cleanup_stale_temps(parent, &self.path);
+        let temp = parent.join(temp_name(&self.path, Uuid::new_v4()));
         let result = (|| {
             let mut file = create_private_temp(&temp)?;
             file.write_all(bytes).map_err(map_write_error)?;
@@ -111,6 +116,40 @@ impl SessionStore {
     fn fail_next_replace_for_test(&self) {
         self.fail_next_replace
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn temp_name(session_path: &Path, id: Uuid) -> String {
+    let name = session_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.json");
+    format!(".{name}.{id}.tmp")
+}
+
+fn cleanup_stale_temps(parent: &Path, session_path: &Path) {
+    let name = session_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.json");
+    let prefix = format!(".{name}.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(candidate) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(id) = candidate
+            .strip_prefix(&prefix)
+            .and_then(|candidate| candidate.strip_suffix(".tmp"))
+        else {
+            continue;
+        };
+        if Uuid::parse_str(id).is_err() || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let _ = fs::remove_file(entry.path());
     }
 }
 

@@ -97,6 +97,111 @@ fn missing_session_is_empty_and_missing_data_file_keeps_tab_but_marks_it_unavail
 }
 
 #[test]
+fn directories_are_unavailable_even_when_metadata_succeeds() {
+    let dir = tempdir().unwrap();
+    let data_directory = dir.path().join("not-a-file.parquet");
+    fs::create_dir(&data_directory).unwrap();
+    let store = SessionStore::new(dir.path().join("session.json"));
+    let expected = SessionSnapshot {
+        version: 1,
+        tabs: vec![tab(
+            "directory",
+            data_directory.to_string_lossy().into_owned(),
+            String::new(),
+        )],
+        active_tab_id: Some("directory".into()),
+    };
+    store.save(&expected).unwrap();
+
+    let restored = store.load().unwrap();
+
+    assert_eq!(restored.snapshot, expected);
+    assert_eq!(restored.unavailable_tab_ids, vec!["directory"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinks_to_directories_are_unavailable() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("directory");
+    let link = dir.path().join("linked.parquet");
+    fs::create_dir(&target).unwrap();
+    symlink(&target, &link).unwrap();
+    let store = SessionStore::new(dir.path().join("session.json"));
+    store
+        .save(&SessionSnapshot {
+            version: 1,
+            tabs: vec![tab(
+                "link",
+                link.to_string_lossy().into_owned(),
+                String::new(),
+            )],
+            active_tab_id: Some("link".into()),
+        })
+        .unwrap();
+
+    assert_eq!(store.load().unwrap().unavailable_tab_ids, vec!["link"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn special_files_are_unavailable_without_opening_them() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempdir().unwrap();
+    let fifo = dir.path().join("not-data.parquet");
+    let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+    let store = SessionStore::new(dir.path().join("session.json"));
+    store
+        .save(&SessionSnapshot {
+            version: 1,
+            tabs: vec![tab(
+                "fifo",
+                fifo.to_string_lossy().into_owned(),
+                String::new(),
+            )],
+            active_tab_id: Some("fifo".into()),
+        })
+        .unwrap();
+
+    let restored = store.load().unwrap();
+
+    assert_eq!(restored.unavailable_tab_ids, vec!["fifo"]);
+}
+
+#[test]
+fn save_removes_only_matching_stale_regular_temp_siblings() {
+    let dir = tempdir().unwrap();
+    let session_path = dir.path().join("session.json");
+    let stale = dir
+        .path()
+        .join(".session.json.00000000-0000-0000-0000-000000000001.tmp");
+    let matching_directory = dir
+        .path()
+        .join(".session.json.00000000-0000-0000-0000-000000000002.tmp");
+    let unknown = dir.path().join(".session-other.tmp");
+    fs::write(&stale, b"stale").unwrap();
+    fs::create_dir(&matching_directory).unwrap();
+    fs::write(&unknown, b"owned by someone else").unwrap();
+
+    SessionStore::new(&session_path)
+        .save(&SessionSnapshot {
+            version: 1,
+            tabs: vec![],
+            active_tab_id: None,
+        })
+        .unwrap();
+
+    assert!(!stale.exists());
+    assert!(matching_directory.is_dir());
+    assert!(unknown.is_file());
+}
+
+#[test]
 fn invalid_saved_documents_recover_to_empty_with_sanitized_warning() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("session.json");
@@ -239,6 +344,55 @@ fn concurrent_saves_leave_one_complete_snapshot() {
 }
 
 #[test]
+fn overlapping_loads_observe_only_complete_old_or_new_snapshots() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("session.json");
+    let store = Arc::new(SessionStore::new(&path));
+    let old = SessionSnapshot {
+        version: 1,
+        tabs: vec![tab(
+            "old",
+            "/missing/old.parquet".into(),
+            "o".repeat(128 * 1024),
+        )],
+        active_tab_id: Some("old".into()),
+    };
+    let new = SessionSnapshot {
+        version: 1,
+        tabs: vec![tab(
+            "new",
+            "/missing/new.parquet".into(),
+            "n".repeat(128 * 1024),
+        )],
+        active_tab_id: Some("new".into()),
+    };
+    store.save(&old).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let writer = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        let old = old.clone();
+        let new = new.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            for _ in 0..100 {
+                store.save(&new).unwrap();
+                store.save(&old).unwrap();
+            }
+            store.save(&new).unwrap();
+        })
+    };
+    barrier.wait();
+    for _ in 0..500 {
+        let restored = store.load().unwrap();
+        assert_eq!(restored.warning, None);
+        assert!(restored.snapshot == old || restored.snapshot == new);
+    }
+    writer.join().unwrap();
+    assert_eq!(store.load().unwrap().snapshot, new);
+}
+
+#[test]
 fn injected_atomic_failure_preserves_previous_valid_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("session.json");
@@ -258,6 +412,31 @@ fn injected_atomic_failure_preserves_previous_valid_file() {
     };
     assert!(matches!(store.save(&second), Err(AppError::Internal(_))));
     assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_atomic_save_replaces_an_existing_session() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("session.json");
+    let store = SessionStore::new(&path);
+    let old = SessionSnapshot {
+        version: 1,
+        tabs: vec![],
+        active_tab_id: None,
+    };
+    let new = SessionSnapshot {
+        version: 1,
+        tabs: vec![tab(
+            "new",
+            "C:\\missing\\new.parquet".into(),
+            "select 2".into(),
+        )],
+        active_tab_id: Some("new".into()),
+    };
+    store.save(&old).unwrap();
+    store.save(&new).unwrap();
+    assert_eq!(store.load().unwrap().snapshot, new);
 }
 
 #[cfg(unix)]
