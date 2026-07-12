@@ -1001,3 +1001,25 @@ fn guarded_fd_source_survives_replacement_of_original_path() {
         .unwrap();
     assert_eq!(id, 1);
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_query_source_blocks_replacement_until_guard_is_dropped() {
+    let (directory, registry, file_id) = registered_fixture(1);
+    let path = directory.path().join("rows.parquet");
+    let source = registry.resolve_query_source(&file_id).unwrap();
+    let guarded = source.duckdb_path.to_str().unwrap().replace('\'', "''");
+    let connection = Connection::open_in_memory().unwrap();
+    let id: i64 = connection
+        .query_row(
+            &format!("SELECT id FROM read_parquet('{guarded}')"),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(id, 0);
+    assert!(std::fs::remove_file(&path).is_err());
+    drop(source);
+    std::fs::remove_file(&path).unwrap();
+}

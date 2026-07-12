@@ -261,7 +261,7 @@ impl FileRegistry {
             .get(file_id)
             .map(|entry| entry.fingerprint.clone())
             .ok_or_else(|| AppError::InvalidPath("Unknown file ID".into()))?;
-        let file = open_regular_file(&registered.canonical_path)?;
+        let file = open_query_guard(&registered.canonical_path)?;
         let current = fingerprint_from_open_file(&registered.canonical_path, &file)?;
         if current != registered {
             return Err(AppError::StaleFile(
@@ -303,10 +303,22 @@ fn open_query_guard(path: &Path) -> Result<File, AppError> {
     #[cfg(unix)]
     options.custom_flags(libc::O_NONBLOCK);
     #[cfg(windows)]
-    options.share_mode(1);
-    options
+    options.share_mode(windows_query_guard_share_mode());
+    let file = options
         .open(path)
-        .map_err(|error| map_io_error(error, path))
+        .map_err(|error| map_io_error(error, path))?;
+    let metadata = file.metadata().map_err(|error| map_io_error(error, path))?;
+    if !metadata.is_file() {
+        return Err(AppError::InvalidPath("Path is not a file".into()));
+    }
+    Ok(file)
+}
+
+#[cfg(any(windows, test))]
+const fn windows_query_guard_share_mode() -> u32 {
+    // Windows FILE_SHARE_READ: other readers (including DuckDB) may reopen the
+    // canonical path, while writers and delete/replace operations remain blocked.
+    0x0000_0001
 }
 
 #[tauri::command]
@@ -565,6 +577,22 @@ mod command_tests {
         ));
 
         assert!(matches!(result, Err(AppError::InvalidPath(_))));
+    }
+}
+
+#[cfg(test)]
+mod query_guard_tests {
+    use super::windows_query_guard_share_mode;
+
+    #[test]
+    fn windows_query_guard_allows_reads_but_denies_write_and_delete_sharing() {
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+
+        let share_mode = windows_query_guard_share_mode();
+        assert_eq!(share_mode, FILE_SHARE_READ);
+        assert_eq!(share_mode & (FILE_SHARE_WRITE | FILE_SHARE_DELETE), 0);
     }
 }
 
