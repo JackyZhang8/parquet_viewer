@@ -1,6 +1,6 @@
 import type { AppError, CellValue, ColumnSchema } from '../domain/types'
 
-export type QueryStatus = 'idle' | 'starting' | 'running' | 'done' | 'cancelled' | 'error'
+export type QueryStatus = 'idle' | 'queued' | 'running' | 'done' | 'cancelled' | 'error'
 
 export interface QueryViewState {
   status: QueryStatus

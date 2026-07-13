@@ -19,3 +19,11 @@ it('shows sanitized query errors and a retry hint', () => {
   expect(screen.getByRole('alert')).toHaveTextContent(/SQL_ERROR.*Unknown column/i)
   expect(screen.getByText(/adjust filters and run again/i)).toBeInTheDocument()
 })
+
+it('labels queued work and offers a stop action', async () => {
+  const onCancel = vi.fn()
+  render(<StatusBar status="queued" elapsedMs="0" returnedRows="0" visibleRange={null} totalRows={0} onCancel={onCancel} />)
+  expect(screen.getByRole('status')).toHaveTextContent('Queued')
+  await userEvent.click(screen.getByRole('button', { name: /stop query/i }))
+  expect(onCancel).toHaveBeenCalledOnce()
+})

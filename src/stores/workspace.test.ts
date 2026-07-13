@@ -276,6 +276,16 @@ describe('workspace store', () => {
     expect(store.getState().queriesByTab[tab.id]).toMatchObject({ status: 'running', queryId: 'q1', rows: [[1], [2], [3]], returnedRows: '3', loadingBatch: false })
   })
 
+  it('reports queued while awaiting backend query admission', async () => {
+    const starting = deferred<QueryStarted>()
+    const desktop = api({ startFilterQuery: vi.fn(() => starting.promise) })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    const run = store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    expect(store.getState().queriesByTab[id].status).toBe('queued')
+    starting.resolve({ queryId: 'q', columns: [] }); await run
+    expect(store.getState().queriesByTab[id].status).toBe('done')
+  })
+
   it('appends ordered batches, handles a final empty batch, and coalesces duplicate loads', async () => {
     const pending = deferred<QueryBatch>()
     const desktop = api({

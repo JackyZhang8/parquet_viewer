@@ -7,6 +7,7 @@ import { formatCellValue, formatTsvValue } from './valueFormat'
 interface Point { row: number; column: number }
 interface Detail { value: CellValue; returnFocus: HTMLElement }
 interface Props {
+  queryKey: string
   columns: ColumnSchema[]
   rows: CellValue[][]
   status: QueryStatus
@@ -42,7 +43,7 @@ const observeOffset = (instance: Virtualizer<HTMLDivElement, Element>, callback:
 }
 
 export function DataGrid(props: Props) {
-  const { columns, rows, status, done, loading, onLoadMore, onVisibleRangeChange, onCopyStatus } = props
+  const { queryKey, columns, rows, status, done, loading, onLoadMore, onVisibleRangeChange, onCopyStatus } = props
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null)
   const lastLoadSize = useRef<number | null>(null)
@@ -55,6 +56,7 @@ export function DataGrid(props: Props) {
   const [copyMessage, setCopyMessage] = useState('')
   const setScrollRef = useCallback((node: HTMLDivElement | null) => { scrollRef.current = node; setScrollElement(node) }, [])
   const visible = useMemo(() => columns.map((column, index) => ({ column, index })).filter(({ index }) => !hidden.has(index)), [columns, hidden])
+  const visiblePosition = useCallback((column: number) => visible.findIndex(({ index }) => index === column), [visible])
   useEffect(() => setWidths((current) => columns.map((column, index) => current[index] ?? defaultWidth(column))), [columns])
 
   const rowVirtualizer = useVirtualizer({
@@ -78,9 +80,26 @@ export function DataGrid(props: Props) {
     onVisibleRangeChange?.(range)
   }, [firstRow, lastRow, onVisibleRangeChange])
   useEffect(() => {
+    lastLoadSize.current = null; setAnchor(null); setFocus(null); setDetail(null); setCopyMessage('')
+    setHidden(new Set()); setWidths(columns.map(defaultWidth)); setMenuOpen(false)
+  }, [queryKey])
+  useEffect(() => {
     if (status !== 'running' || done || loading || lastRow === undefined || lastRow < rows.length - 5 || lastLoadSize.current === rows.length) return
     lastLoadSize.current = rows.length; onLoadMore?.()
-  }, [done, lastRow, loading, onLoadMore, rows.length, status])
+  }, [done, lastRow, loading, onLoadMore, queryKey, rows.length, status])
+  useEffect(() => {
+    if (!focus || visiblePosition(focus.column) >= 0) return
+    if (!visible.length) { setFocus(null); setAnchor(null); setDetail(null); return }
+    const nearest = [...visible].sort((a, b) => Math.abs(a.index - focus.column) - Math.abs(b.index - focus.column) || b.index - a.index)[0]
+    const next = { row: focus.row, column: nearest.index }
+    setFocus(next); setAnchor(next); setDetail(null)
+    requestAnimationFrame(() => scrollRef.current?.querySelector<HTMLElement>(`[data-cell="${next.row}:${next.column}"]`)?.focus())
+  }, [focus, visible, visiblePosition])
+  useEffect(() => {
+    if (!anchor || visiblePosition(anchor.column) >= 0 || !visible.length) return
+    const nearest = [...visible].sort((a, b) => Math.abs(a.index - anchor.column) - Math.abs(b.index - anchor.column) || b.index - a.index)[0]
+    setAnchor({ row: anchor.row, column: nearest.index })
+  }, [anchor, visible, visiblePosition])
   useEffect(() => {
     if (!detail) return
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape') { setDetail(null); detail.returnFocus.focus() } }
@@ -89,8 +108,10 @@ export function DataGrid(props: Props) {
 
   const selected = (point: Point) => {
     if (!anchor || !focus) return false
+    const pointPosition = visiblePosition(point.column); const anchorPosition = visiblePosition(anchor.column); const focusPosition = visiblePosition(focus.column)
+    if (pointPosition < 0 || anchorPosition < 0 || focusPosition < 0) return false
     return point.row >= Math.min(anchor.row, focus.row) && point.row <= Math.max(anchor.row, focus.row) &&
-      point.column >= Math.min(anchor.column, focus.column) && point.column <= Math.max(anchor.column, focus.column)
+      pointPosition >= Math.min(anchorPosition, focusPosition) && pointPosition <= Math.max(anchorPosition, focusPosition)
   }
   const select = (point: Point, shift: boolean, element: HTMLElement) => {
     if (!shift || !anchor) setAnchor(point)
@@ -101,14 +122,16 @@ export function DataGrid(props: Props) {
     if (formatted.truncated || formatted.kind === 'nested' || formatted.kind === 'blob') setDetail({ value, returnFocus: element })
   }
   const navigate = (event: React.KeyboardEvent, point: Point) => {
-    const delta = event.key === 'ArrowDown' ? [1, 0] : event.key === 'ArrowUp' ? [-1, 0] : event.key === 'ArrowRight' ? [0, 1] : event.key === 'ArrowLeft' ? [0, -1] : null
-    if (!delta) return
+    const delta = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
+    const horizontal = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+    if (!delta && !horizontal) return
     event.preventDefault()
-    const next = { row: Math.max(0, Math.min(rows.length - 1, point.row + delta[0])), column: Math.max(0, Math.min(columns.length - 1, point.column + delta[1])) }
+    const currentVisible = Math.max(0, visiblePosition(point.column))
+    const nextVisible = Math.max(0, Math.min(visible.length - 1, currentVisible + horizontal))
+    const next = { row: Math.max(0, Math.min(rows.length - 1, point.row + delta)), column: visible[nextVisible]?.index ?? point.column }
     if (!event.shiftKey) setAnchor(next); setFocus(next)
     rowVirtualizer.scrollToIndex(next.row, { align: 'auto' })
-    const visibleIndex = visible.findIndex(({ index }) => index === next.column)
-    if (visibleIndex >= 0) columnVirtualizer.scrollToIndex(visibleIndex, { align: 'auto' })
+    if (nextVisible >= 0) columnVirtualizer.scrollToIndex(nextVisible, { align: 'auto' })
     requestAnimationFrame(() => scrollRef.current?.querySelector<HTMLElement>(`[data-cell="${next.row}:${next.column}"]`)?.focus())
   }
   const copy = async (mode: 'cell' | 'row' | 'selection') => {
@@ -119,8 +142,9 @@ export function DataGrid(props: Props) {
     else {
       const start = anchor ?? focus
       const rowStart = Math.min(start.row, focus.row); const rowEnd = Math.max(start.row, focus.row)
-      const columnStart = Math.min(start.column, focus.column); const columnEnd = Math.max(start.column, focus.column)
-      region = rows.slice(rowStart, rowEnd + 1).map((row) => row.slice(columnStart, columnEnd + 1))
+      const startPosition = visiblePosition(start.column); const focusPosition = visiblePosition(focus.column)
+      const selectedColumns = visible.slice(Math.min(startPosition, focusPosition), Math.max(startPosition, focusPosition) + 1)
+      region = rows.slice(rowStart, rowEnd + 1).map((row) => selectedColumns.map(({ index }) => row[index] ?? null))
     }
     const text = region.map((row) => row.map(formatTsvValue).join('\t')).join('\n')
     try { await navigator.clipboard.writeText(text); setCopyMessage('Copied to clipboard'); onCopyStatus?.('Copied to clipboard', true) }

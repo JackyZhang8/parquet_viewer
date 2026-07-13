@@ -246,7 +246,7 @@ export const createWorkspaceStore = (
       if (previous.queryId) void api.cancelQuery(previous.queryId).catch(() => undefined)
       const stale = previous.rows.length > 0
       set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
-        ...previous, status: 'starting', error: undefined, loadingBatch: false, done: false,
+        ...previous, status: 'queued', error: undefined, loadingBatch: false, done: false,
         stale, generation, queryId: undefined,
       } } }))
       const previewLimit = Number.isSafeInteger(request.previewLimit) && request.previewLimit > 0
@@ -276,7 +276,7 @@ export const createWorkspaceStore = (
     },
     async loadNextBatch(tabId) {
       const query = get().queriesByTab[tabId]
-      if (!query?.queryId || query.loadingBatch || query.done || !['running', 'starting'].includes(query.status)) return
+      if (!query?.queryId || query.loadingBatch || query.done || query.status !== 'running') return
       const { queryId, generation } = query
       set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: { ...query, loadingBatch: true } } }))
       try {

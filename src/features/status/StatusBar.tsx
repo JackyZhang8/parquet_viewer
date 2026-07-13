@@ -16,10 +16,11 @@ interface Props {
 
 export function StatusBar(props: Props) {
   const { status, elapsedMs, returnedRows, visibleRange, totalRows, loading, truncated, stale, error, onCancel } = props
-  const active = status === 'starting' || status === 'running'
+  const active = status === 'queued' || status === 'running'
+  const label = status.charAt(0).toUpperCase() + status.slice(1)
   return <footer className="status-bar" aria-label="Query status">
     <span className={`query-status query-status-${status}`} role="status" aria-live="polite">
-      {(loading || status === 'starting') && <span className="status-spinner" aria-label="Loading batch" />} {status}
+      {(loading || status === 'queued') && <span className="status-spinner" aria-label="Loading batch" />} {label}
     </span>
     <span>{elapsedMs} ms</span><span>{returnedRows} returned</span>
     <span>{visibleRange ? `Rows ${visibleRange[0]}–${visibleRange[1]} of ${totalRows}` : `${totalRows} rows`}</span>

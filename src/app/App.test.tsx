@@ -6,6 +6,12 @@ import type { DesktopApi } from '../lib/tauri'
 import { createWorkspaceStore } from '../stores/workspace'
 import { App } from './App'
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 const api = (): DesktopApi => ({
   openFiles: vi.fn(async (paths: string[]) => paths.map((path) => ({ ok: true as const, metadata: { fileId: path, path, name: path.split('/').pop()!, sizeBytes: '1', rowCount: '1', rowGroupCount: 1, columns: [] } }))),
   closeFile: vi.fn(async () => undefined),
@@ -86,6 +92,18 @@ it('opens picker files from the workspace toolbar', async () => {
   render(<App api={desktop} store={store} />)
   await userEvent.click((await screen.findAllByRole('button', { name: /open parquet files/i }))[0])
   expect(await screen.findByRole('tab', { name: /picked.parquet/i })).toBeInTheDocument()
+})
+
+it('shows queued status while backend admission is pending', async () => {
+  const desktop = api(); const starting = deferred<{ queryId: string; columns: [] }>()
+  vi.mocked(desktop.startFilterQuery).mockImplementation(() => starting.promise)
+  const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/queued.parquet'])
+  render(<App api={desktop} store={store} />)
+  await userEvent.click(screen.getByRole('button', { name: 'Run filters' }))
+  expect(within(screen.getByRole('contentinfo', { name: 'Query status' })).getByRole('status')).toHaveTextContent('Queued')
+  expect(screen.getByRole('button', { name: /stop query/i })).toBeInTheDocument()
+  starting.resolve({ queryId: 'q', columns: [] })
+  await waitFor(() => expect(within(screen.getByRole('contentinfo', { name: 'Query status' })).getByRole('status')).toHaveTextContent('Done'))
 })
 
 it('survives StrictMode effect replay with one live drop listener and debounced saves', async () => {
