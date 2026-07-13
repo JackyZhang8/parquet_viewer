@@ -21,13 +21,16 @@ const familyLabel = (kind: ReturnType<typeof columnFamily>['kind']) => {
   return labels[kind] ?? kind
 }
 
-function Field({ column, onCopy }: { column: ColumnSchema; onCopy(name: string): void }) {
+function Field(props: { column: ColumnSchema; index: number; total: number; onCopy(name: string): void }) {
+  const { column, index, total, onCopy } = props
   const family = columnFamily(column)
   const nullability = column.nullable ? 'nullable' : 'required'
-  return <button className="schema-field" aria-label={`Copy field ${column.name}, ${column.logicalType}, ${nullability}`} onClick={() => onCopy(column.name)}>
-    <span className="family-icon" aria-hidden="true">{familyLabel(family.kind).slice(0,1).toUpperCase()}</span>
-    <span><strong>{column.name}</strong><small>{column.logicalType} · {nullability} · {familyLabel(family.kind)}</small></span>
-  </button>
+  return <div role="listitem" aria-setsize={total} aria-posinset={index + 1}>
+    <button className="schema-field" aria-label={`Copy field ${column.name}, ${column.logicalType}, ${nullability}`} onClick={() => onCopy(column.name)}>
+      <span className="family-icon" aria-hidden="true">{familyLabel(family.kind).slice(0,1).toUpperCase()}</span>
+      <span><strong>{column.name}</strong><small>{column.logicalType} · {nullability} · {familyLabel(family.kind)}</small></span>
+    </button>
+  </div>
 }
 
 export function SchemaPanel({ metadata, state = 'ready', width, onWidthChange, onError }: Props) {
@@ -35,7 +38,9 @@ export function SchemaPanel({ metadata, state = 'ready', width, onWidthChange, o
   const [collapsed, setCollapsed] = useState(false)
   const [scrollTop, setScrollTop] = useState(0)
   const [announcement, setAnnouncement] = useState('')
+  const [focusCollapseAfterExpand, setFocusCollapseAfterExpand] = useState(false)
   const expandRef = useRef<HTMLButtonElement>(null)
+  const collapseRef = useRef<HTMLButtonElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const columns = useMemo(() => {
     const query = search.toLowerCase()
@@ -46,6 +51,11 @@ export function SchemaPanel({ metadata, state = 'ready', width, onWidthChange, o
   const visible = columns.slice(start, end)
 
   useEffect(() => { if (collapsed) expandRef.current?.focus() }, [collapsed])
+  useEffect(() => {
+    if (!collapsed && focusCollapseAfterExpand) {
+      collapseRef.current?.focus(); setFocusCollapseAfterExpand(false)
+    }
+  }, [collapsed, focusCollapseAfterExpand])
   const updateSearch = (value: string) => {
     setSearch(value); setScrollTop(0); setAnnouncement('')
     if (listRef.current) listRef.current.scrollTop = 0
@@ -58,11 +68,11 @@ export function SchemaPanel({ metadata, state = 'ready', width, onWidthChange, o
   }
 
   if (collapsed) return <aside className="schema-panel collapsed">
-    <button ref={expandRef} aria-label="Expand schema" onClick={() => setCollapsed(false)}>›</button>
+    <button ref={expandRef} aria-label="Expand schema" onClick={() => { setFocusCollapseAfterExpand(true); setCollapsed(false) }}>›</button>
   </aside>
   return <aside className="schema-panel" style={{ width }}>
     <div className="schema-heading">
-      <strong>Schema</strong><button aria-label="Collapse schema" onClick={() => setCollapsed(true)}>‹</button>
+      <strong>Schema</strong><button ref={collapseRef} aria-label="Collapse schema" onClick={() => setCollapsed(true)}>‹</button>
     </div>
     {state === 'loading' && <p role="status">Loading schema…</p>}
     {state === 'unavailable' && <p>File unavailable</p>}
@@ -80,7 +90,8 @@ export function SchemaPanel({ metadata, state = 'ready', width, onWidthChange, o
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
         {columns.length > 0 && <div className="schema-fields-window" style={{ height: columns.length * ROW_HEIGHT }}>
           <div style={{ transform: `translateY(${start * ROW_HEIGHT}px)` }}>
-            {visible.map((column) => <Field key={column.name} column={column} onCopy={(name) => void copy(name)} />)}
+            {visible.map((column, offset) => <Field key={column.name} column={column} index={start + offset}
+              total={columns.length} onCopy={(name) => void copy(name)} />)}
           </div>
         </div>}
         {metadata.columns.length === 0 && <p>No columns found</p>}

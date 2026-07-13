@@ -85,6 +85,18 @@ describe('buildFilterQueryRequest', () => {
     expect(() => buildFilterQueryRequest(columns, [{column:'id',operator:'lt',value:{type:'null'}}], [], 10)).toThrow(/null.*equality/i)
   })
 
+  it('accepts only finite non-integer number scalars at the request boundary', () => {
+    const floatColumns = [col('DOUBLE', 'score')]
+    expect(() => buildFilterQueryRequest(floatColumns, [
+      {column:'score',operator:'eq',value:{type:'number',value:1}},
+    ], [], 10)).toThrow(/incompatible/i)
+    expect(buildFilterQueryRequest(floatColumns, [
+      {column:'score',operator:'eq',value:{type:'number',value:1.5}},
+    ], [], 10).filters).toEqual([
+      {column:'score',operator:'eq',value:{type:'number',value:1.5}},
+    ])
+  })
+
   it('rejects limits, duplicate sorts, unknown columns, and incompatible conditions', () => {
     expect(() => buildFilterQueryRequest(columns, [], [], 0)).toThrow(/preview/i)
     expect(() => buildFilterQueryRequest(columns, [], [{column:'id',direction:'asc'},{column:'id',direction:'desc'}], 1)).toThrow(/duplicate/i)

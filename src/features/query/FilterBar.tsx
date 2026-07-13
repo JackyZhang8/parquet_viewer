@@ -31,17 +31,25 @@ export function FilterBar(props: Props) {
   const [previewLimit, setPreviewLimit] = useState(10000)
   const [sortColumn, setSortColumn] = useState(columns[0]?.name ?? '')
   const [draftSorts, setDraftSorts] = useState(sorts)
-  const [focusSortAfterUpdate, setFocusSortAfterUpdate] = useState(false)
+  const [focusSortIndex, setFocusSortIndex] = useState<number | null>(null)
   const addConditionRef = useRef<HTMLButtonElement>(null)
   const addSortRef = useRef<HTMLButtonElement>(null)
+  const sortColumnRef = useRef<HTMLSelectElement>(null)
+  const sortListRef = useRef<HTMLOListElement>(null)
   const column = columns.find((item) => item.name === columnName) ?? columns[0]
   const operators = useMemo(() => column ? operatorsFor(column) : [], [column])
   const nullOperator = operator === 'isNull' || operator === 'isNotNull'
 
   useEffect(() => setDraftSorts(sorts), [sorts])
   useEffect(() => {
-    if (focusSortAfterUpdate) { addSortRef.current?.focus(); setFocusSortAfterUpdate(false) }
-  }, [draftSorts, focusSortAfterUpdate])
+    if (focusSortIndex === null) return
+    const removers = sortListRef.current?.querySelectorAll<HTMLButtonElement>('button[aria-label^="Remove "]')
+    const nearest = removers?.[Math.min(focusSortIndex, removers.length - 1)]
+    if (nearest) nearest.focus()
+    else if (addSortRef.current && !addSortRef.current.disabled) addSortRef.current.focus()
+    else sortColumnRef.current?.focus()
+    setFocusSortIndex(null)
+  }, [draftSorts, focusSortIndex])
   useEffect(() => {
     const next = columns.find((item) => item.name === columnName) ?? columns[0]
     if (!next) { setColumnName(''); setOperator('isNull'); setSortColumn(''); return }
@@ -72,7 +80,7 @@ export function FilterBar(props: Props) {
     updateSorts([...draftSorts, { column: sortColumn, direction: 'asc' }])
   }
   const removeSort = (index: number) => {
-    setError(''); setFocusSortAfterUpdate(true); updateSorts(draftSorts.filter((_, current) => current !== index))
+    setError(''); setFocusSortIndex(index); updateSorts(draftSorts.filter((_, current) => current !== index))
   }
   const move = (index: number, delta: number) => {
     const target = index + delta
@@ -111,10 +119,10 @@ export function FilterBar(props: Props) {
       <button ref={addConditionRef} onClick={addCondition} aria-label="Add condition">Add condition</button>
     </div>
     {error && <p className="inline-error" role="alert">{error}</p>}
-    <div className="sort-editor"><strong>Sort</strong><label>Column<select aria-label="Sort column" value={sortColumn} onChange={(event) => { setSortColumn(event.target.value); setError('') }}>
+    <div className="sort-editor"><strong>Sort</strong><label>Column<select ref={sortColumnRef} aria-label="Sort column" value={sortColumn} onChange={(event) => { setSortColumn(event.target.value); setError('') }}>
       {columns.map((item) => <option key={item.name} value={item.name} disabled={draftSorts.some((sort) => sort.column === item.name)}>{item.name}</option>)}
     </select></label><button ref={addSortRef} aria-label="Add sort" disabled={draftSorts.length >= 3 || draftSorts.some((sort) => sort.column === sortColumn)} onClick={addSort}>Add sort</button></div>
-    <ol className="sort-list">{draftSorts.map((sort, index) => <li key={sort.column}>
+    <ol ref={sortListRef} className="sort-list">{draftSorts.map((sort, index) => <li key={sort.column}>
       <span>{index + 1}. {sort.column}</span>
       <select aria-label={`${sort.column} direction`} value={sort.direction} onChange={(event) => updateSorts(draftSorts.map((item, current) => current === index ? {...item, direction:event.target.value as 'asc'|'desc'} : item))}>
         <option value="asc">Ascending</option><option value="desc">Descending</option>

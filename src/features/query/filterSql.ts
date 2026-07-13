@@ -94,7 +94,9 @@ const compatibleScalar = (column: ColumnSchema, scalar: SessionScalar) => {
 const validateScalar = (column: ColumnSchema, scalar: SessionScalar) => {
   if (!compatibleScalar(column, scalar)) throw new Error(`Filter value is incompatible with “${column.name}”`)
   if (scalar.type === 'integer' || scalar.type === 'decimal') convertEditorValue(column, scalar.value)
-  if (scalar.type === 'number' && !Number.isFinite(scalar.value)) throw new Error(`Filter value is incompatible with “${column.name}”`)
+  if (scalar.type === 'number' && (!Number.isFinite(scalar.value) || Number.isInteger(scalar.value))) {
+    throw new Error(`Filter value is incompatible with “${column.name}”`)
+  }
 }
 
 export const buildFilterQueryRequest = (columns: ColumnSchema[], filters: SessionFilter[], sorts: SessionSort[], previewLimit: number): FilterQueryRequest => {

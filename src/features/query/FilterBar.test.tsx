@@ -61,6 +61,13 @@ it('restores add-sort focus after removing a sort', async () => {
   expect(screen.getByRole('button',{name:'Add sort'})).toHaveFocus()
 })
 
+it('focuses the nearest remaining sort when Add sort stays disabled', async () => {
+  render(<FilterBar columns={columns} filters={[]} sorts={[{column:'id',direction:'asc'},{column:'active',direction:'asc'}]} onFiltersChange={vi.fn()} onSortsChange={vi.fn()} onRun={vi.fn()} />)
+  await userEvent.click(screen.getByRole('button',{name:/remove active sort/i}))
+  expect(screen.getByRole('button',{name:/remove id sort/i})).toHaveFocus()
+  expect(screen.getByRole('button',{name:'Add sort'})).toBeDisabled()
+})
+
 it('shows inline integer and decimal validation and changes operator options', async () => {
   render(<FilterBar columns={columns} filters={[]} sorts={[]} onFiltersChange={vi.fn()} onSortsChange={vi.fn()} onRun={vi.fn()} />)
   await userEvent.selectOptions(screen.getByLabelText('Filter column'), 'amount')
