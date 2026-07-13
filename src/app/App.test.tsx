@@ -9,6 +9,9 @@ import { App } from './App'
 const api = (): DesktopApi => ({
   openFiles: vi.fn(async (paths: string[]) => paths.map((path) => ({ ok: true as const, metadata: { fileId: path, path, name: path.split('/').pop()!, sizeBytes: '1', rowCount: '1', rowGroupCount: 1, columns: [] } }))),
   closeFile: vi.fn(async () => undefined),
+  startFilterQuery: vi.fn(async () => ({ queryId: 'q', columns: [] })),
+  fetchQueryBatch: vi.fn(async () => ({ queryId: 'q', rows: [], done: true, returnedRows: '0', elapsedMs: '0' })),
+  cancelQuery: vi.fn(async () => undefined),
   loadSession: vi.fn(async () => ({ snapshot: { version: 1, tabs: [], activeTabId: null }, unavailableTabIds: [], warning: null })),
   saveSession: vi.fn(async () => undefined),
   pickParquetFiles: vi.fn(async () => null),
@@ -30,28 +33,34 @@ it('hydrates, subscribes/unsubscribes drops, and switches from empty intake to w
   expect(screen.getByText('Schema')).toBeInTheDocument()
   expect(screen.queryByRole('textbox', { name: /sql/i })).not.toBeInTheDocument()
   expect(screen.queryByText('Data')).not.toBeInTheDocument()
+  expect(desktop.startFilterQuery).not.toHaveBeenCalled()
+  expect(desktop.fetchQueryBatch).not.toHaveBeenCalled()
   view.unmount()
   await waitFor(() => expect(unlisten).toHaveBeenCalled())
 })
 
-it('keeps filters isolated when switching ready tabs and introduces no result grid or SQL editor', async () => {
+it('runs filters into isolated per-tab result grids without introducing a SQL editor', async () => {
   const desktop = api()
   vi.mocked(desktop.loadSession).mockResolvedValue({snapshot:{version:1,activeTabId:'a',tabs:[
     {id:'a',fileId:'a',path:'/a.parquet',sqlDraft:'',filters:[],sorts:[],viewState:{scrollTop:0,scrollLeft:0,sidebarWidth:260,editorHeight:180}},
     {id:'b',fileId:'b',path:'/b.parquet',sqlDraft:'',filters:[],sorts:[],viewState:{scrollTop:0,scrollLeft:0,sidebarWidth:260,editorHeight:180}},
   ]},unavailableTabIds:[],warning:null})
   vi.mocked(desktop.openFiles).mockImplementation(async (paths) => paths.map((path)=>({ok:true as const,metadata:{fileId:path.slice(1,2),path,name:path.slice(1),sizeBytes:'1',rowCount:'1',rowGroupCount:1,columns:[{name:'id',logicalType:'INT64',nullable:false}]}})))
+  vi.mocked(desktop.startFilterQuery).mockImplementation(async ({ fileId }) => ({ queryId: `q-${fileId}`, columns: [{name:'id',logicalType:'INT64',nullable:false}] }))
+  vi.mocked(desktop.fetchQueryBatch).mockImplementation(async (queryId) => ({ queryId, rows: [[queryId]], done: true, returnedRows: '1', elapsedMs: '2' }))
   render(<App api={desktop} />)
   await userEvent.type(await screen.findByLabelText('Filter value'),'1')
   await userEvent.click(screen.getByRole('button',{name:'Add condition'}))
   expect(screen.getByText(/id equals/i)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Run filters' }))
+  expect(await screen.findByRole('gridcell', { name: /q-a/i })).toBeInTheDocument()
   await userEvent.click(screen.getByRole('tab',{name:/b.parquet/i}))
   expect(screen.queryByText(/id equals/i)).not.toBeInTheDocument()
+  expect(screen.queryByRole('grid')).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('tab',{name:/a.parquet/i}))
   expect(screen.getByText(/id equals/i)).toBeInTheDocument()
-  expect(screen.queryByRole('grid')).not.toBeInTheDocument()
+  expect(screen.getByRole('gridcell', { name: /q-a/i })).toBeInTheDocument()
   expect(screen.queryByRole('textbox',{name:/sql/i})).not.toBeInTheDocument()
-  expect(screen.getByText(/results arrive in task 9/i)).toBeInTheDocument()
 })
 
 it('does not leak schema search or collapse state between tabs', async () => {

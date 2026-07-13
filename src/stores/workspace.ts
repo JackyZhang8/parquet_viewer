@@ -1,9 +1,10 @@
 import { createStore, type StoreApi } from 'zustand/vanilla'
 import type {
-  AppError, FileMetadata, SessionFilter, SessionSnapshot, SessionSort, SessionViewState,
+  AppError, FileMetadata, FilterQueryRequest, SessionFilter, SessionSnapshot, SessionSort, SessionViewState,
 } from '../domain/types'
 import { isAppError } from '../domain/types'
 import type { DesktopApi, OpenFileOutcome } from '../lib/tauri'
+import { idleQueryState, internalQueryError, type QueryViewState } from './queryState'
 
 export type TabStatus = 'loading' | 'ready' | 'unavailable' | 'error'
 
@@ -29,6 +30,7 @@ export interface WorkspaceState {
   pathErrors: Record<string, AppError>
   hydrationState: HydrationState
   warning: string | null
+  queriesByTab: Record<string, QueryViewState>
   reportError(key: string, error: unknown): void
   resume(): void
   openPaths(paths: string[]): Promise<void>
@@ -42,6 +44,9 @@ export interface WorkspaceState {
   setFilters(id: string, filters: SessionFilter[]): void
   setSorts(id: string, sorts: SessionSort[]): void
   setViewState(id: string, viewState: Partial<SessionViewState>): void
+  runFilterQuery(tabId: string, request: FilterQueryRequest): Promise<void>
+  loadNextBatch(tabId: string): Promise<void>
+  cancelQuery(tabId: string): Promise<void>
   flushSave(): Promise<void>
   dispose(): void
 }
@@ -70,8 +75,11 @@ export const createWorkspaceStore = (
   let hydrating: Promise<void> | undefined
   let disposed = false
   let store: StoreApi<WorkspaceState>
+  const queryLimits = new Map<string, number>()
 
-  const sanitized = (error: unknown): AppError => isAppError(error) ? error : {
+  const sanitized = (error: unknown): AppError => isAppError(error) ? {
+    code: error.code, message: error.message, detail: error.detail,
+  } : {
     code: 'INTERNAL_ERROR', message: 'An internal error occurred', detail: null,
   }
 
@@ -94,6 +102,10 @@ export const createWorkspaceStore = (
     const state = store.getState()
     const removed = state.tabs.filter((tab) => ids.has(tab.id))
     if (!removed.length) return
+    const queryIds = removed.flatMap((tab) => {
+      const queryId = state.queriesByTab[tab.id]?.queryId
+      return queryId ? [queryId] : []
+    })
     const remaining = state.tabs.filter((tab) => !ids.has(tab.id))
     let active = state.activeTabId
     if (active && ids.has(active)) {
@@ -102,7 +114,11 @@ export const createWorkspaceStore = (
       active = remaining.find((tab) => state.tabs.indexOf(tab) > activeIndex)?.id ??
         previous[previous.length - 1]?.id ?? null
     }
-    updateTabs(remaining, active)
+    const queriesByTab = { ...state.queriesByTab }
+    for (const id of ids) { delete queriesByTab[id]; queryLimits.delete(id) }
+    store.setState({ tabs: remaining, activeTabId: active, queriesByTab })
+    scheduleSave()
+    await Promise.all(queryIds.map(async (queryId) => { try { await api.cancelQuery(queryId) } catch { /* best effort */ } }))
     const remainingIds = new Set(remaining.map((tab) => tab.fileId))
     await Promise.all([...new Set(removed.filter((tab) => tab.status === 'ready').map((tab) => tab.fileId))]
       .filter((fileId) => fileId && !remainingIds.has(fileId))
@@ -145,7 +161,7 @@ export const createWorkspaceStore = (
   }
 
   store = createStore<WorkspaceState>((set, get) => ({
-    tabs: [], activeTabId: null, opening: 0, pathErrors: {}, hydrationState: 'idle', warning: null,
+    tabs: [], activeTabId: null, opening: 0, pathErrors: {}, hydrationState: 'idle', warning: null, queriesByTab: {},
     async openPaths(input) {
       const paths = [...new Set(input.filter((path) => path.length > 0))]
       if (!paths.length) return
@@ -222,6 +238,80 @@ export const createWorkspaceStore = (
     setFilters(id, filters) { updateTabs(get().tabs.map((tab) => tab.id === id ? { ...tab, filters } : tab)) },
     setSorts(id, sorts) { updateTabs(get().tabs.map((tab) => tab.id === id ? { ...tab, sorts } : tab)) },
     setViewState(id, viewState) { updateTabs(get().tabs.map((tab) => tab.id === id ? { ...tab, viewState: { ...tab.viewState, ...viewState } } : tab)) },
+    async runFilterQuery(tabId, request) {
+      const tab = get().tabs.find((item) => item.id === tabId)
+      if (!tab || tab.status !== 'ready' || get().activeTabId !== tabId) return
+      const previous = get().queriesByTab[tabId] ?? idleQueryState()
+      const generation = previous.generation + 1
+      if (previous.queryId) void api.cancelQuery(previous.queryId).catch(() => undefined)
+      const stale = previous.rows.length > 0
+      set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
+        ...previous, status: 'starting', error: undefined, loadingBatch: false, done: false,
+        stale, generation, queryId: undefined,
+      } } }))
+      const previewLimit = Number.isSafeInteger(request.previewLimit) && request.previewLimit > 0
+        ? Math.min(request.previewLimit, 10_000) : 10_000
+      const normalized = { ...request, previewLimit }
+      try {
+        const started = await api.startFilterQuery({ fileId: tab.fileId, query: normalized, batchSize: 500 })
+        const current = get().queriesByTab[tabId]
+        if (!current || current.generation !== generation) {
+          try { await api.cancelQuery(started.queryId) } catch { /* best effort */ }
+          return
+        }
+        queryLimits.set(tabId, previewLimit)
+        set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
+          ...idleQueryState(generation), status: 'running', queryId: started.queryId,
+          columns: started.columns,
+        } } }))
+        await get().loadNextBatch(tabId)
+      } catch (error) {
+        const current = get().queriesByTab[tabId]
+        if (!current || current.generation !== generation) return
+        set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
+          ...current, status: 'error', loadingBatch: false, stale: current.rows.length > 0,
+          error: sanitized(error),
+        } } }))
+      }
+    },
+    async loadNextBatch(tabId) {
+      const query = get().queriesByTab[tabId]
+      if (!query?.queryId || query.loadingBatch || query.done || !['running', 'starting'].includes(query.status)) return
+      const { queryId, generation } = query
+      set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: { ...query, loadingBatch: true } } }))
+      try {
+        const batch = await api.fetchQueryBatch(queryId)
+        const current = get().queriesByTab[tabId]
+        if (!current || current.generation !== generation || current.queryId !== queryId) return
+        if (batch.queryId !== queryId || batch.rows.some((row) => row.length !== current.columns.length)) throw internalQueryError()
+        const limit = queryLimits.get(tabId) ?? 10_000
+        const available = Math.max(0, limit - current.rows.length)
+        const appended = batch.rows.slice(0, available)
+        const rows = [...current.rows, ...appended]
+        const truncated = batch.rows.length > available || (rows.length >= limit && !batch.done)
+        const done = batch.done || truncated
+        set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
+          ...current, rows, done, status: done ? 'done' : 'running', returnedRows: batch.returnedRows,
+          elapsedMs: batch.elapsedMs, loadingBatch: false, truncated, stale: false,
+        } } }))
+        if (truncated) { try { await api.cancelQuery(queryId) } catch { /* best effort */ } }
+      } catch (error) {
+        const current = get().queriesByTab[tabId]
+        if (!current || current.generation !== generation || current.queryId !== queryId) return
+        set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
+          ...current, status: 'error', loadingBatch: false, error: sanitized(error),
+        } } }))
+        try { await api.cancelQuery(queryId) } catch { /* best effort */ }
+      }
+    },
+    async cancelQuery(tabId) {
+      const query = get().queriesByTab[tabId]
+      if (!query) return
+      set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
+        ...query, status: 'cancelled', done: true, loadingBatch: false, generation: query.generation + 1,
+      } } }))
+      if (query.queryId) { try { await api.cancelQuery(query.queryId) } catch { /* best effort */ } }
+    },
     flushSave: saveNow,
     dispose() { disposed = true; if (saveTimer) clearTimeout(saveTimer); saveTimer = undefined },
   }))

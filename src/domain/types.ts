@@ -281,9 +281,15 @@ export const isAppError = (value: unknown): value is AppError =>
 
 export const isQueryBatch = (value: unknown): value is QueryBatch =>
   isRecord(value) &&
-  typeof value.queryId === 'string' &&
+  hasExactKeys(value, ['queryId', 'rows', 'done', 'returnedRows', 'elapsedMs']) &&
+  typeof value.queryId === 'string' && value.queryId.length > 0 &&
   Array.isArray(value.rows) &&
   value.rows.every((row) => Array.isArray(row) && row.every(isCellValue)) &&
   typeof value.done === 'boolean' &&
-  isDecimalString(value.returnedRows) &&
-  isDecimalString(value.elapsedMs)
+  u64WireDecimal(value.returnedRows) &&
+  u64WireDecimal(value.elapsedMs)
+
+const u64WireDecimal = (value: unknown): value is string => {
+  if (!isDecimalString(value) || !/^(?:0|[1-9]\d*)$/.test(value)) return false
+  return value.length < U64_MAX.length || (value.length === U64_MAX.length && value <= U64_MAX)
+}

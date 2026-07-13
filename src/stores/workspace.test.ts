@@ -1,13 +1,14 @@
 import { act } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AppError, FileMetadata, RestoredSession, SessionSnapshot } from '../domain/types'
+import type { AppError, FileMetadata, QueryBatch, QueryStarted, RestoredSession, SessionSnapshot } from '../domain/types'
 import type { DesktopApi, OpenFileOutcome } from '../lib/tauri'
 import { createWorkspaceStore } from './workspace'
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => { resolve = done })
-  return { promise, resolve }
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 
 const metadata = (fileId: string, path: string): FileMetadata => ({
@@ -31,6 +32,9 @@ const emptyRestore = (): RestoredSession => ({
 const api = (overrides: Partial<DesktopApi> = {}): DesktopApi => ({
   openFiles: vi.fn(async (paths: string[]) => paths.map((path, i) => ({ ok: true, metadata: metadata(`f${i}`, path) }) as OpenFileOutcome)),
   closeFile: vi.fn(async () => undefined),
+  startFilterQuery: vi.fn(async (): Promise<QueryStarted> => ({ queryId: 'q', columns: [] })),
+  fetchQueryBatch: vi.fn(async (): Promise<QueryBatch> => ({ queryId: 'q', rows: [], done: true, returnedRows: '0', elapsedMs: '0' })),
+  cancelQuery: vi.fn(async () => undefined),
   loadSession: vi.fn(async () => emptyRestore()),
   saveSession: vi.fn(async () => undefined),
   pickParquetFiles: vi.fn(async () => null),
@@ -256,5 +260,122 @@ describe('workspace store', () => {
     expect(store.getState().tabs).toHaveLength(0)
     expect(desktop.closeFile).toHaveBeenCalledTimes(1)
     expect(desktop.closeFile).toHaveBeenCalledWith('shared')
+  })
+
+  it('runs a filter with the authoritative file id and fetches the first batch', async () => {
+    const desktop = api({
+      startFilterQuery: vi.fn(async () => ({ queryId: 'q1', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })),
+      fetchQueryBatch: vi.fn(async () => ({ queryId: 'q1', rows: [[1], [2], [3]], done: false, returnedRows: '3', elapsedMs: '4' })),
+    })
+    const store = createWorkspaceStore(desktop)
+    await store.getState().openPaths(['/a.parquet'])
+    const tab = store.getState().tabs[0]
+    await store.getState().runFilterQuery(tab.id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 10 })
+
+    expect(desktop.startFilterQuery).toHaveBeenCalledWith({ fileId: tab.fileId, query: { selectedColumns: [], filters: [], sorts: [], previewLimit: 10 }, batchSize: 500 })
+    expect(store.getState().queriesByTab[tab.id]).toMatchObject({ status: 'running', queryId: 'q1', rows: [[1], [2], [3]], returnedRows: '3', loadingBatch: false })
+  })
+
+  it('appends ordered batches, handles a final empty batch, and coalesces duplicate loads', async () => {
+    const pending = deferred<QueryBatch>()
+    const desktop = api({
+      startFilterQuery: vi.fn(async () => ({ queryId: 'q1', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })),
+      fetchQueryBatch: vi.fn()
+        .mockResolvedValueOnce({ queryId: 'q1', rows: [[1], [2], [3]], done: false, returnedRows: '3', elapsedMs: '1' })
+        .mockImplementationOnce(() => pending.promise)
+        .mockResolvedValueOnce({ queryId: 'q1', rows: [[7], [8], [9]], done: false, returnedRows: '9', elapsedMs: '3' })
+        .mockResolvedValueOnce({ queryId: 'q1', rows: [[10]], done: false, returnedRows: '10', elapsedMs: '4' })
+        .mockResolvedValueOnce({ queryId: 'q1', rows: [], done: true, returnedRows: '10', elapsedMs: '5' }),
+    })
+    const store = createWorkspaceStore(desktop)
+    await store.getState().openPaths(['/a.parquet']); const id = store.getState().tabs[0].id
+    await store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 20 })
+    const one = store.getState().loadNextBatch(id); const two = store.getState().loadNextBatch(id)
+    expect(desktop.fetchQueryBatch).toHaveBeenCalledTimes(2)
+    pending.resolve({ queryId: 'q1', rows: [[4], [5], [6]], done: false, returnedRows: '6', elapsedMs: '2' })
+    await Promise.all([one, two]); await store.getState().loadNextBatch(id); await store.getState().loadNextBatch(id); await store.getState().loadNextBatch(id)
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'done', rows: [[1], [2], [3], [4], [5], [6], [7], [8], [9], [10]], done: true, returnedRows: '10' })
+  })
+
+  it('caps frontend rows at preview limit and cancels remaining backend work', async () => {
+    const desktop = api({
+      startFilterQuery: vi.fn(async () => ({ queryId: 'q1', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })),
+      fetchQueryBatch: vi.fn(async () => ({ queryId: 'q1', rows: [[1], [2], [3]], done: false, returnedRows: '3', elapsedMs: '1' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 2 })
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'done', rows: [[1], [2]], truncated: true })
+    expect(desktop.cancelQuery).toHaveBeenCalledWith('q1')
+  })
+
+  it('ignores and cancels late old starts after replacement', async () => {
+    const old = deferred<QueryStarted>()
+    const desktop = api({
+      startFilterQuery: vi.fn().mockImplementationOnce(() => old.promise).mockResolvedValueOnce({ queryId: 'new', columns: [] }),
+      fetchQueryBatch: vi.fn(async (queryId) => ({ queryId, rows: [], done: true, returnedRows: '0', elapsedMs: '1' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    const first = store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    const second = store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    await second; old.resolve({ queryId: 'old', columns: [] }); await first
+    expect(store.getState().queriesByTab[id]).toMatchObject({ queryId: 'new', status: 'done' })
+    expect(desktop.cancelQuery).toHaveBeenCalledWith('old')
+  })
+
+  it('ignores a late old fetch after a replacement query completes', async () => {
+    const oldBatch = deferred<QueryBatch>()
+    const desktop = api({
+      startFilterQuery: vi.fn().mockResolvedValueOnce({ queryId: 'old', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] }).mockResolvedValueOnce({ queryId: 'new', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] }),
+      fetchQueryBatch: vi.fn().mockImplementationOnce(() => oldBatch.promise).mockResolvedValueOnce({ queryId: 'new', rows: [['new row']], done: true, returnedRows: '1', elapsedMs: '2' }),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    const first = store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    await vi.waitFor(() => expect(store.getState().queriesByTab[id]?.loadingBatch).toBe(true))
+    const second = store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    await second; oldBatch.resolve({ queryId: 'old', rows: [['old row']], done: true, returnedRows: '1', elapsedMs: '50' }); await first
+    expect(store.getState().queriesByTab[id]).toMatchObject({ queryId: 'new', rows: [['new row']], status: 'done' })
+    expect(desktop.cancelQuery).toHaveBeenCalledWith('old')
+  })
+
+  it('sanitizes malformed row widths, exposes the error, and cancels the query', async () => {
+    const desktop = api({
+      startFilterQuery: vi.fn(async () => ({ queryId: 'q1', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })),
+      fetchQueryBatch: vi.fn(async () => ({ queryId: 'q1', rows: [[1, 2]], done: false, returnedRows: '1', elapsedMs: '1' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'error', error: { code: 'INTERNAL_ERROR' }, rows: [] })
+    expect(desktop.cancelQuery).toHaveBeenCalledWith('q1')
+  })
+
+  it('cancels and removes per-tab transient query state when closing', async () => {
+    const desktop = api({
+      startFilterQuery: vi.fn(async () => ({ queryId: 'q1', columns: [] })),
+      fetchQueryBatch: vi.fn(async () => ({ queryId: 'q1', rows: [], done: false, returnedRows: '0', elapsedMs: '1' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a', '/b']); const [a, b] = store.getState().tabs
+    await store.getState().runFilterQuery(a.id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    await store.getState().cancelQuery(a.id)
+    expect(store.getState().queriesByTab[a.id].status).toBe('cancelled')
+    await store.getState().closeTab(a.id)
+    expect(store.getState().queriesByTab[a.id]).toBeUndefined()
+    expect(store.getState().queriesByTab[b.id]).toBeUndefined()
+    expect(desktop.cancelQuery).toHaveBeenCalledWith('q1')
+  })
+
+  it('keeps query state isolated and excludes every transient field from saves', async () => {
+    const desktop = api({
+      startFilterQuery: vi.fn(async ({ fileId }) => ({ queryId: `q-${fileId}`, columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })),
+      fetchQueryBatch: vi.fn(async (queryId) => ({ queryId, rows: [[queryId]], done: true, returnedRows: '1', elapsedMs: '1' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a', '/b']); const [a, b] = store.getState().tabs
+    await store.getState().runFilterQuery(a.id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    store.getState().activateTab(b.id)
+    await store.getState().runFilterQuery(b.id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    expect(store.getState().queriesByTab[a.id].rows).toEqual([[`q-${a.fileId}`]])
+    expect(store.getState().queriesByTab[b.id].rows).toEqual([[`q-${b.fileId}`]])
+    await store.getState().flushSave()
+    const serialized = JSON.stringify(vi.mocked(desktop.saveSession).mock.calls.at(-1)![0])
+    for (const forbidden of ['queryId', 'rows', 'returnedRows', 'elapsedMs', 'loadingBatch', 'generation']) expect(serialized).not.toContain(forbidden)
   })
 })

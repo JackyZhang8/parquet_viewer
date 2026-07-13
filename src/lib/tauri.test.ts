@@ -47,6 +47,37 @@ it.each([
   }])
 })
 
+it('invokes the filter query lifecycle with typed arguments', async () => {
+  const started = { queryId: 'query-1', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] }
+  const batch = { queryId: 'query-1', rows: [['9007199254740993']], done: true, returnedRows: '1', elapsedMs: '7' }
+  invoke.mockResolvedValueOnce(started).mockResolvedValueOnce(batch).mockResolvedValueOnce(undefined)
+  const request = { fileId: 'file-1', query: { selectedColumns: [], filters: [], sorts: [], previewLimit: 10000 }, batchSize: 500 }
+
+  await expect(desktopApi.startFilterQuery(request)).resolves.toEqual(started)
+  await expect(desktopApi.fetchQueryBatch('query-1')).resolves.toEqual(batch)
+  await expect(desktopApi.cancelQuery('query-1')).resolves.toBeUndefined()
+  expect(invoke.mock.calls).toEqual([
+    ['start_filter_query', { request }],
+    ['fetch_query_batch', { queryId: 'query-1' }],
+    ['cancel_query', { queryId: 'query-1' }],
+  ])
+})
+
+it.each([
+  ['started extra key', { queryId: 'q', columns: [], hidden: true }, 'start'],
+  ['started empty query id', { queryId: '', columns: [] }, 'start'],
+  ['started malformed column', { queryId: 'q', columns: [{ name: '', logicalType: 'INT64', nullable: false }] }, 'start'],
+  ['batch extra key', { queryId: 'q', rows: [], done: true, returnedRows: '0', elapsedMs: '0', hidden: true }, 'batch'],
+  ['batch unsafe number', { queryId: 'q', rows: [[9007199254740992]], done: true, returnedRows: '1', elapsedMs: '0' }, 'batch'],
+  ['batch malformed counter', { queryId: 'q', rows: [], done: true, returnedRows: '01', elapsedMs: '0' }, 'batch'],
+])('sanitizes malformed query payload: %s', async (_name, payload, command) => {
+  invoke.mockResolvedValue(payload)
+  const promise = command === 'start'
+    ? desktopApi.startFilterQuery({ fileId: 'f', query: { selectedColumns: [], filters: [], sorts: [], previewLimit: 1 }, batchSize: 1 })
+    : desktopApi.fetchQueryBatch('q')
+  await expect(promise).rejects.toEqual({ code: 'INTERNAL_ERROR', message: 'An internal error occurred', detail: null })
+})
+
 it('accepts an exact restored session payload', async () => {
   const restored = { snapshot: { version: 1, tabs: [tab()], activeTabId: 'tab-1' }, unavailableTabIds: [], warning: null }
   invoke.mockResolvedValue(restored)

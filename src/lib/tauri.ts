@@ -2,8 +2,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { open } from '@tauri-apps/plugin-dialog'
 import { revealItemInDir as reveal } from '@tauri-apps/plugin-opener'
-import type { AppError, FileMetadata, RestoredSession, SessionSnapshot } from '../domain/types'
-import { isAppError, isSessionScalar } from '../domain/types'
+import type {
+  AppError, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryStarted, RestoredSession,
+  SessionSnapshot,
+} from '../domain/types'
+import { isAppError, isQueryBatch, isSessionScalar } from '../domain/types'
 
 export type OpenFileOutcome =
   | { ok: true; metadata: FileMetadata }
@@ -12,6 +15,9 @@ export type OpenFileOutcome =
 export interface DesktopApi {
   openFiles(paths: string[]): Promise<OpenFileOutcome[]>
   closeFile(fileId: string): Promise<void>
+  startFilterQuery(request: FilterQueryStartRequest): Promise<QueryStarted>
+  fetchQueryBatch(queryId: string): Promise<QueryBatch>
+  cancelQuery(queryId: string): Promise<void>
   loadSession(): Promise<RestoredSession>
   saveSession(snapshot: SessionSnapshot): Promise<void>
   pickParquetFiles(): Promise<string[] | null>
@@ -54,6 +60,22 @@ const metadata = (value: unknown): FileMetadata | null => {
       typeof column.nullable === 'boolean')
   ) return null
   return value as unknown as FileMetadata
+}
+
+const queryStarted = (value: unknown): QueryStarted => {
+  if (!record(value) || !exactKeys(value, ['queryId', 'columns']) ||
+      typeof value.queryId !== 'string' || value.queryId.length === 0 ||
+      !Array.isArray(value.columns) || value.columns.length > 512 ||
+      !value.columns.every((column) => record(column) && exactKeys(column, ['name', 'logicalType', 'nullable']) &&
+        typeof column.name === 'string' && column.name.length > 0 &&
+        typeof column.logicalType === 'string' && column.logicalType.length > 0 &&
+        typeof column.nullable === 'boolean')) throw internalError()
+  return value as unknown as QueryStarted
+}
+
+const queryBatch = (value: unknown): QueryBatch => {
+  if (!isQueryBatch(value)) throw internalError()
+  return value
 }
 
 export const normalizeOpenOutcomes = (value: unknown): OpenFileOutcome[] => {
@@ -117,6 +139,13 @@ export const desktopApi: DesktopApi = {
     return outcomes
   },
   closeFile: (fileId) => invoke('close_file', { fileId }),
+  async startFilterQuery(request) {
+    return queryStarted(await invoke('start_filter_query', { request }))
+  },
+  async fetchQueryBatch(queryId) {
+    return queryBatch(await invoke('fetch_query_batch', { queryId }))
+  },
+  cancelQuery: (queryId) => invoke('cancel_query', { queryId }),
   async loadSession() {
     return restoredSession(await invoke('load_session'))
   },

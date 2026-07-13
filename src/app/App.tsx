@@ -8,11 +8,12 @@ import { desktopApi, type DesktopApi } from '../lib/tauri'
 import { createWorkspaceStore, type WorkspaceState } from '../stores/workspace'
 import type { FilterQueryRequest } from '../domain/types'
 import type { StoreApi } from 'zustand/vanilla'
+import { QueryResultPane } from './QueryResultPane'
 import './app.css'
 
 interface AppProps { api?: DesktopApi; store?: StoreApi<WorkspaceState>; onRun?: (request: FilterQueryRequest) => void }
 
-export function App({ api = desktopApi, store: suppliedStore, onRun = () => undefined }: AppProps) {
+export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps) {
   const store = useMemo(() => suppliedStore ?? createWorkspaceStore(api), [api, suppliedStore])
   const state = useStore(store)
   useEffect(() => {
@@ -37,7 +38,12 @@ export function App({ api = desktopApi, store: suppliedStore, onRun = () => unde
         <FileTabs tabs={state.tabs} activeTabId={state.activeTabId} onActivate={state.activateTab} onClose={state.closeTab} onCloseOthers={state.closeOthers} onCloseRight={state.closeRight} onReveal={api.revealItemInDir} onError={state.reportError} />
         {active?.status === 'ready' && active.metadata ? <section className="workspace-main">
           <SchemaPanel key={active.id} metadata={active.metadata} width={active.viewState.sidebarWidth} onWidthChange={(sidebarWidth) => state.setViewState(active.id,{sidebarWidth})} onError={(error) => state.reportError('Clipboard',error)} />
-          <div className="query-pane"><FilterBar key={active.id} columns={active.metadata.columns} filters={active.filters} sorts={active.sorts} onFiltersChange={(filters) => state.setFilters(active.id,filters)} onSortsChange={(sorts) => state.setSorts(active.id,sorts)} onRun={onRun} /><div className="result-placeholder"><strong>No query result</strong><p>Run filters to prepare a request. Results arrive in Task 9.</p></div></div>
+          <div className="query-pane"><FilterBar key={active.id} columns={active.metadata.columns} filters={active.filters} sorts={active.sorts} onFiltersChange={(filters) => state.setFilters(active.id,filters)} onSortsChange={(sorts) => state.setSorts(active.id,sorts)} onRun={(request) => { onRun?.(request); void state.runFilterQuery(active.id, request) }} />
+            <QueryResultPane key={`result-${active.id}`} query={state.queriesByTab[active.id]}
+              initialScroll={{ top: active.viewState.scrollTop, left: active.viewState.scrollLeft }}
+              onScrollChange={({ top: scrollTop, left: scrollLeft }) => state.setViewState(active.id, { scrollTop, scrollLeft })}
+              onLoadMore={() => void state.loadNextBatch(active.id)} onCancel={() => void state.cancelQuery(active.id)} />
+          </div>
         </section> : <section className="workspace-placeholder"><div className="opened-file-card"><span className={`opened-status ${active?.status}`} aria-hidden="true" /><div><strong>{active?.status === 'loading' ? 'Loading file…' : active?.status === 'unavailable' ? 'File unavailable' : 'Could not open file'}</strong><p>{active?.path}</p><span className="file-state">{active?.status}</span>{active?.status !== 'loading' && <button onClick={() => state.openPaths([active.path])}>Retry</button>}</div></div></section>}
       </>}
     </main>
