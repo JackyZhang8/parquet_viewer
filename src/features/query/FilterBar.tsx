@@ -11,6 +11,7 @@ interface Props {
   onFiltersChange(filters: SessionFilter[]): void
   onSortsChange(sorts: SessionSort[]): void
   onRun(request: FilterQueryRequest): void
+  initialPreviewLimit?: number
 }
 
 const labels: Record<FilterOperator, string> = {
@@ -23,12 +24,12 @@ const firstOperator = (column?: ColumnSchema): FilterOperator =>
 const scalarLabel = (value: SessionScalar) => value.type === 'null' ? 'NULL' : String(value.value)
 
 export function FilterBar(props: Props) {
-  const { columns, filters, sorts, onFiltersChange, onSortsChange, onRun } = props
+  const { columns, filters, sorts, onFiltersChange, onSortsChange, onRun, initialPreviewLimit = 10_000 } = props
   const [columnName, setColumnName] = useState(columns[0]?.name ?? '')
   const [operator, setOperator] = useState<FilterOperator>(() => firstOperator(columns[0]))
   const [raw, setRaw] = useState('')
   const [error, setError] = useState('')
-  const [previewLimit, setPreviewLimit] = useState(10000)
+  const [previewLimit, setPreviewLimit] = useState(initialPreviewLimit)
   const [sortColumn, setSortColumn] = useState(columns[0]?.name ?? '')
   const [draftSorts, setDraftSorts] = useState(sorts)
   const [focusSortIndex, setFocusSortIndex] = useState<number | null>(null)
@@ -41,6 +42,7 @@ export function FilterBar(props: Props) {
   const nullOperator = operator === 'isNull' || operator === 'isNotNull'
 
   useEffect(() => setDraftSorts(sorts), [sorts])
+  useEffect(() => setPreviewLimit(initialPreviewLimit), [initialPreviewLimit])
   useEffect(() => {
     if (focusSortIndex === null) return
     const removers = sortListRef.current?.querySelectorAll<HTMLButtonElement>('button[aria-label^="Remove "]')
@@ -133,7 +135,7 @@ export function FilterBar(props: Props) {
     </li>)}</ol>
     <div className="filter-actions">
       <button aria-label="Clear filters" onClick={clearFilters}>Clear filters</button>
-      <label>Preview rows<input aria-label="Preview rows" type="number" min="1" max="10000" value={previewLimit} onChange={(event) => { setPreviewLimit(Number(event.target.value)); setError('') }} /></label>
+      <label>Preview rows<input aria-label="Preview rows" type="number" min="1" max="100000" value={previewLimit} onChange={(event) => { setPreviewLimit(Number(event.target.value)); setError('') }} /></label>
       <button className="primary-button" aria-label="Run filters" onClick={run}>Run</button>
     </div>
   </section>

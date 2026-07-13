@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use duckdb::InterruptHandle;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, RwLock};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
@@ -43,6 +43,7 @@ struct ExportState {
 pub struct ExportService {
     state: Arc<Mutex<ExportState>>,
     changed: Arc<Condvar>,
+    runtime_settings: Arc<RwLock<crate::settings::RuntimeSettings>>,
 }
 
 struct ExportPlan {
@@ -53,9 +54,14 @@ struct ExportPlan {
     destination: PathBuf,
     temporary: PathBuf,
     overwrite: bool,
+    runtime_settings: crate::settings::RuntimeSettings,
 }
 
 impl ExportService {
+    pub(crate) fn update_settings(&self, settings: crate::settings::RuntimeSettings) {
+        *self.runtime_settings.write() = settings;
+    }
+
     pub fn start_export<F>(
         &self,
         request: ExportRequest,
@@ -108,6 +114,7 @@ impl ExportService {
             destination,
             temporary,
             overwrite: request.overwrite,
+            runtime_settings: self.runtime_settings.read().clone(),
         };
         let service = self.clone();
         let files = files.clone();
@@ -142,7 +149,7 @@ impl ExportService {
         });
         let result = run_export_inner(&plan, &files, &cancelled, &interrupt);
         *interrupt.lock() = None;
-        if !matches!(result, Ok(_)) {
+        if result.is_err() {
             let _ = fs::remove_file(&plan.temporary);
         }
         let terminal = match result {
@@ -214,6 +221,13 @@ impl ExportService {
         }
     }
 
+    pub fn cancel_all(&self) {
+        let ids = self.state.lock().active.keys().cloned().collect::<Vec<_>>();
+        for id in ids {
+            let _ = self.cancel_export(&id);
+        }
+    }
+
     #[cfg(test)]
     fn wait_for_terminal_for_test(
         &self,
@@ -248,7 +262,10 @@ fn run_export_inner(
     if cancelled.load(Ordering::Acquire) {
         return Err(AppError::Cancelled("The export was cancelled".into()));
     }
-    let connection = open_configured_connection(&format!("export-{}", plan.export_id))?;
+    let connection = open_configured_connection(
+        &format!("export-{}", plan.export_id),
+        &plan.runtime_settings,
+    )?;
     *interrupt.lock() = Some(connection.interrupt_handle());
     files.revalidate_query_source(&plan.source)?;
     create_data_view(&connection, &plan.source)?;
@@ -534,5 +551,32 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".part"))
             .count();
         assert_eq!(partials, 0);
+    }
+
+    #[test]
+    fn cancel_all_cleans_export_on_application_shutdown() {
+        let (directory, registry, file_id) = fixture(2_000);
+        let destination = directory.path().join("closed.csv");
+        let service = ExportService::default();
+        let started = service
+            .start_export(
+                ExportRequest {
+                    file_id: file_id.clone(),
+                    destination: destination.to_string_lossy().into_owned(),
+                    overwrite: false,
+                    source: ExportSource::Sql {
+                        sql: "SELECT * FROM data a CROSS JOIN data b".into(),
+                    },
+                },
+                &registry,
+                |_| {},
+            )
+            .unwrap();
+
+        service.cancel_all();
+        let terminal = wait(&service, &started.export_id);
+
+        assert_eq!(terminal.status, ExportStatus::Cancelled);
+        assert!(!destination.exists());
     }
 }

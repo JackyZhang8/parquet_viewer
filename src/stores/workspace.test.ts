@@ -41,6 +41,9 @@ const api = (overrides: Partial<DesktopApi> = {}): DesktopApi => ({
   onExportProgress: vi.fn(async () => () => undefined),
   pickCsvDestination: vi.fn(async () => null),
   confirmExportOverwrite: vi.fn(async () => false),
+  loadSettings: vi.fn(async () => ({ theme: 'system' as const, batchSize: 500, previewLimit: 10000, memoryLimitMb: 512, tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: true })),
+  saveSettings: vi.fn(async (settings) => settings),
+  pickDirectory: vi.fn(async () => null),
   loadSession: vi.fn(async () => emptyRestore()),
   saveSession: vi.fn(async () => undefined),
   pickParquetFiles: vi.fn(async () => null),
@@ -392,9 +395,9 @@ describe('workspace store', () => {
 
   it('rejects preview limits above the UI cap without calling the backend', async () => {
     const desktop = api(); const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
-    await store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 10001 })
+    await store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 100001 })
     expect(desktop.startFilterQuery).not.toHaveBeenCalled()
-    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'error', error: { code: 'INVALID_ARGUMENT', message: expect.stringMatching(/10000/) } })
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'error', error: { code: 'INVALID_ARGUMENT', message: expect.stringMatching(/100000/) } })
   })
 
   it('uses the backend truncation signal instead of row-count heuristics', async () => {

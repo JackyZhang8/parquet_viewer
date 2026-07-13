@@ -76,6 +76,19 @@ export interface ExportProgress {
   error: AppError | null
 }
 
+export type AppTheme = 'system' | 'light' | 'dark'
+
+export interface AppSettings {
+  theme: AppTheme
+  batchSize: number
+  previewLimit: number
+  memoryLimitMb: number
+  tempDirectory: string | null
+  tempDiskWarningMb: number
+  concurrency: number
+  restoreTabs: boolean
+}
+
 export type ValueFilterOperator =
   | 'eq'
   | 'notEq'
@@ -378,6 +391,18 @@ export const isExportProgress = (value: unknown): value is ExportProgress =>
   new Set(['queued', 'running', 'completed', 'cancelled', 'error']).has(value.status) &&
   u64WireDecimal(value.rowsWritten) &&
   (value.error === null || isAppError(value.error))
+
+export const isAppSettings = (value: unknown): value is AppSettings =>
+  isRecord(value) &&
+  hasExactKeys(value, ['theme', 'batchSize', 'previewLimit', 'memoryLimitMb', 'tempDirectory', 'tempDiskWarningMb', 'concurrency', 'restoreTabs']) &&
+  (value.theme === 'system' || value.theme === 'light' || value.theme === 'dark') &&
+  typeof value.batchSize === 'number' && Number.isSafeInteger(value.batchSize) && value.batchSize >= 50 && value.batchSize <= 5000 &&
+  typeof value.previewLimit === 'number' && Number.isSafeInteger(value.previewLimit) && value.previewLimit >= 100 && value.previewLimit <= 100000 &&
+  typeof value.memoryLimitMb === 'number' && Number.isSafeInteger(value.memoryLimitMb) && value.memoryLimitMb >= 64 && value.memoryLimitMb <= 16384 &&
+  (value.tempDirectory === null || (typeof value.tempDirectory === 'string' && value.tempDirectory.length > 0)) &&
+  typeof value.tempDiskWarningMb === 'number' && Number.isSafeInteger(value.tempDiskWarningMb) && value.tempDiskWarningMb >= 64 && value.tempDiskWarningMb <= 102400 &&
+  typeof value.concurrency === 'number' && Number.isSafeInteger(value.concurrency) && value.concurrency >= 1 && value.concurrency <= 4 &&
+  typeof value.restoreTabs === 'boolean'
 
 const u64WireDecimal = (value: unknown): value is string => {
   if (!isDecimalString(value) || !/^(?:0|[1-9]\d*)$/.test(value)) return false

@@ -8,6 +8,8 @@ button:focus-visible,[role=tab]:focus-visible,input:focus-visible,textarea:focus
 .app-shell { height: 100vh; display:flex; flex-direction:column; background:var(--bg); }
 .titlebar { height:46px; padding:0 12px; display:flex; gap:9px; align-items:center; border-bottom:1px solid var(--line); background:var(--panel); }
 .titlebar .open-button { margin-left:auto; }
+.settings-button { margin-left:auto; border:1px solid var(--line); background:var(--panel); border-radius:7px; padding:7px 11px; cursor:pointer; }
+.titlebar .settings-button + .open-button { margin-left:0; }
 .app-mark { display:grid; place-items:center; width:25px; height:25px; border-radius:7px; color:#fff; font-weight:800; background:var(--accent); }
 .open-button,.primary-button,.files-menu-button { border:1px solid var(--line); background:var(--panel); border-radius:7px; padding:7px 11px; cursor:pointer; }
 .primary-button { color:#fff; background:var(--accent); border-color:var(--accent); padding:9px 16px; }
@@ -74,3 +76,11 @@ button:focus-visible,[role=tab]:focus-visible,input:focus-visible,textarea:focus
 .status-spinner { display:inline-block; width:10px; height:10px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 @media (prefers-color-scheme: dark) { :root { color:#e7eaf0; --bg:#15171d; --panel:#1d2028; --line:#343944; --muted:#9ca5b5; --accent:#9487ff; --accent-soft:#2c2947; --danger:#ff8793; }.warning-banner { background:#413919; }.error-banner { background:#3d2025; } }
+:root[data-theme="dark"] { color:#e7eaf0; --bg:#15171d; --panel:#1d2028; --line:#343944; --muted:#9ca5b5; --accent:#9487ff; --accent-soft:#2c2947; --danger:#ff8793; }
+:root[data-theme="light"] { color:#1d2430; --bg:#f4f6f9; --panel:#fff; --line:#d8dee8; --muted:#687386; --accent:#6759d9; --accent-soft:#ebe9ff; --danger:#b93847; }
+.settings-backdrop { position:fixed; z-index:100; inset:0; display:grid; place-items:center; padding:24px; background:#0008; }
+.settings-dialog { width:min(680px,90vw); max-height:88vh; overflow:auto; border:1px solid var(--line); border-radius:12px; background:var(--panel); box-shadow:0 20px 70px #0007; }
+.settings-dialog > header,.settings-dialog > footer { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:12px 16px; border-bottom:1px solid var(--line); }
+.settings-dialog > header button { border:0; background:none; font-size:22px; cursor:pointer; }.settings-dialog > footer { justify-content:flex-end; border-top:1px solid var(--line); border-bottom:0; }
+.settings-dialog > footer button,.settings-directory-actions button { padding:7px 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); cursor:pointer; }
+.settings-fields { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:16px; }.settings-fields label { display:grid; gap:5px; color:var(--muted); font-size:12px; }.settings-fields input,.settings-fields select { padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }.settings-wide,.settings-directory-actions,.settings-check { grid-column:1/-1; }.settings-directory-actions { display:flex; gap:8px; }.settings-check { display:flex!important; grid-template-columns:auto 1fr; align-items:center; }.settings-dialog .inline-error { padding:0 16px; }

@@ -443,6 +443,30 @@ fn close_file_cancels_all_related_queries() {
 }
 
 #[test]
+fn cancel_all_releases_every_cursor_on_application_shutdown() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = FileRegistry::default();
+    let first_file = add_fixture(&directory, &registry, "shutdown-one.parquet", 20);
+    let second_file = add_fixture(&directory, &registry, "shutdown-two.parquet", 20);
+    let service = QueryService::default();
+    let _first = service
+        .start_query(request(first_file, "SELECT * FROM data", 1, 100), &registry)
+        .unwrap();
+    let _second = service
+        .start_query(
+            request(second_file, "SELECT * FROM data", 1, 100),
+            &registry,
+        )
+        .unwrap();
+    assert_eq!(service.active_cursor_count(), 2);
+
+    service.cancel_all();
+
+    assert_eq!(service.active_cursor_count(), 0);
+    service.wait_for_admitted_for_test(0);
+}
+
+#[test]
 fn stale_file_is_rejected_before_cursor_creation() {
     let (directory, registry, file_id) = registered_fixture(2);
     let path = directory.path().join("rows.parquet");

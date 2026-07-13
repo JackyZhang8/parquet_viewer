@@ -34,6 +34,9 @@ const api = (): DesktopApi => ({
   onExportProgress: vi.fn(async () => () => undefined),
   pickCsvDestination: vi.fn(async () => null),
   confirmExportOverwrite: vi.fn(async () => false),
+  loadSettings: vi.fn(async () => ({ theme: 'system' as const, batchSize: 500, previewLimit: 10000, memoryLimitMb: 512, tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: true })),
+  saveSettings: vi.fn(async (settings) => settings),
+  pickDirectory: vi.fn(async () => null),
   loadSession: vi.fn(async () => ({ snapshot: { version: 1, tabs: [], activeTabId: null }, unavailableTabIds: [], warning: null })),
   saveSession: vi.fn(async () => undefined),
   pickParquetFiles: vi.fn(async () => null),
@@ -59,6 +62,29 @@ it('hydrates, subscribes/unsubscribes drops, and switches from empty intake to w
   expect(desktop.fetchQueryBatch).not.toHaveBeenCalled()
   view.unmount()
   await waitFor(() => expect(unlisten).toHaveBeenCalled())
+})
+
+it('does not restore saved tabs when the restore setting is disabled', async () => {
+  const desktop = api()
+  vi.mocked(desktop.loadSettings).mockResolvedValue({ theme: 'system', batchSize: 500, previewLimit: 10000, memoryLimitMb: 512,
+    tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: false })
+  render(<App api={desktop} />)
+  expect((await screen.findAllByRole('button', { name: /open parquet files/i }))[0]).toBeInTheDocument()
+  expect(desktop.loadSession).not.toHaveBeenCalled()
+})
+
+it('uses saved batch and preview defaults for new filter queries', async () => {
+  const desktop = api()
+  vi.mocked(desktop.loadSettings).mockResolvedValue({ theme: 'system', batchSize: 750, previewLimit: 25000, memoryLimitMb: 512,
+    tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: true })
+  const store = createWorkspaceStore(desktop)
+  await store.getState().openPaths(['/settings.parquet'])
+  render(<App api={desktop} store={store} />)
+  await waitFor(() => expect(screen.getByLabelText('Preview rows')).toHaveValue(25000))
+  await userEvent.click(screen.getByRole('button', { name: 'Run filters' }))
+  expect(desktop.startFilterQuery).toHaveBeenCalledWith({
+    fileId: '/settings.parquet', query: { selectedColumns: [], filters: [], sorts: [], previewLimit: 25000 }, batchSize: 750,
+  })
 })
 
 it('runs filters into isolated per-tab result grids without introducing a SQL editor', async () => {

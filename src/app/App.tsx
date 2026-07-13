@@ -5,26 +5,40 @@ import { FileTabs } from '../features/tabs/FileTabs'
 import { FilterBar } from '../features/query/FilterBar'
 import { SqlEditor } from '../features/query/SqlEditor'
 import { SchemaPanel } from '../features/schema/SchemaPanel'
+import { SettingsDialog } from '../features/settings/SettingsDialog'
 import { desktopApi, type DesktopApi } from '../lib/tauri'
 import { createWorkspaceStore, type WorkspaceState } from '../stores/workspace'
-import { isAppError, type ExportProgress, type ExportSource, type FilterQueryRequest } from '../domain/types'
+import { isAppError, type AppSettings, type ExportProgress, type ExportSource, type FilterQueryRequest } from '../domain/types'
 import type { StoreApi } from 'zustand/vanilla'
 import { QueryResultPane } from './QueryResultPane'
 import './app.css'
 
 interface AppProps { api?: DesktopApi; store?: StoreApi<WorkspaceState>; onRun?: (request: FilterQueryRequest) => void }
 
+const defaultSettings: AppSettings = { theme: 'system', batchSize: 500, previewLimit: 10_000, memoryLimitMb: 512,
+  tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: true }
+
 export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps) {
   const store = useMemo(() => suppliedStore ?? createWorkspaceStore(api), [api, suppliedStore])
   const state = useStore(store)
   const [queryModes, setQueryModes] = useState<Record<string, 'filter' | 'sql'>>({})
   const [exportsByTab, setExportsByTab] = useState<Record<string, ExportProgress>>({})
+  const [settings, setSettings] = useState(defaultSettings)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | undefined
     let unlistenExport: (() => void) | undefined
     store.getState().resume()
-    store.getState().hydrate().catch((error) => store.getState().reportError('Session restore', error))
+    api.loadSettings().then((loaded) => {
+      if (disposed) return
+      setSettings(loaded)
+      document.documentElement.dataset.theme = loaded.theme
+      return store.getState().hydrate(loaded.restoreTabs)
+    }).catch((error) => {
+      store.getState().reportError('Settings', error)
+      return store.getState().hydrate()
+    }).catch((error) => store.getState().reportError('Session restore', error))
     api.onFileDrop((paths) => {
       store.getState().openPaths(paths).catch((error) => store.getState().reportError('File drop', error))
     }).then((cleanup) => {
@@ -91,9 +105,15 @@ export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps)
     if (!progress || !['queued', 'running'].includes(progress.status)) return
     try { await api.cancelExport(progress.exportId) } catch (error) { store.getState().reportError('Cancel export', error) }
   }
+  const saveSettings = async (next: AppSettings) => {
+    const saved = await api.saveSettings(next)
+    setSettings(saved)
+    document.documentElement.dataset.theme = saved.theme
+    return saved
+  }
   return (
     <main className="app-shell">
-      <header className="titlebar"><span className="app-mark">P</span><strong>Parquet Viewer</strong><DropZone compact pickFiles={api.pickParquetFiles} onOpen={state.openPaths} onError={state.reportError} /></header>
+      <header className="titlebar"><span className="app-mark">P</span><strong>Parquet Viewer</strong><button type="button" className="settings-button" onClick={() => setSettingsOpen(true)}>Settings</button><DropZone compact pickFiles={api.pickParquetFiles} onOpen={state.openPaths} onError={state.reportError} /></header>
       {state.warning && <div className="warning-banner" role="status">{state.warning}</div>}
       {Object.entries(state.pathErrors).map(([path, error]) => <div className="error-banner" role="alert" key={path}><strong>{path.split(/[\\/]/).pop()}</strong>: {error.message}</div>)}
       {state.tabs.length === 0 ? <div className="empty-workspace"><DropZone pickFiles={api.pickParquetFiles} onOpen={state.openPaths} onError={state.reportError} />{state.opening > 0 && <p>Opening {state.opening} file(s)…</p>}</div> : <>
@@ -108,11 +128,12 @@ export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps)
                 tabIndex={queryMode === 'sql' ? 0 : -1} onKeyDown={(event) => modeKeyDown(event, 'sql')} onClick={() => selectQueryMode('sql')}>SQL</button>
             </div>
             {queryMode === 'filter' ? <div id={modeIds.filterPanel} role="tabpanel" aria-labelledby={modeIds.filterTab}>
-              <FilterBar key={active.id} columns={active.metadata.columns} filters={active.filters} sorts={active.sorts} onFiltersChange={(filters) => state.setFilters(active.id,filters)} onSortsChange={(sorts) => state.setSorts(active.id,sorts)} onRun={(request) => { onRun?.(request); void state.runFilterQuery(active.id, request) }} />
+              <FilterBar key={active.id} columns={active.metadata.columns} filters={active.filters} sorts={active.sorts} initialPreviewLimit={settings.previewLimit} onFiltersChange={(filters) => state.setFilters(active.id,filters)} onSortsChange={(sorts) => state.setSorts(active.id,sorts)} onRun={(request) => { onRun?.(request); void state.runFilterQuery(active.id, request, settings.batchSize) }} />
             </div> : <div id={modeIds.sqlPanel} role="tabpanel" aria-labelledby={modeIds.sqlTab} className="sql-tabpanel">
               <SqlEditor key={active.id} tabId={active.id} fileId={active.fileId} value={active.sqlDraft} columns={active.metadata.columns}
+                initialPreviewLimit={settings.previewLimit}
                 height={active.viewState.editorHeight} error={state.queriesByTab[active.id]?.source === 'sql' && state.queriesByTab[active.id]?.status === 'error' && state.queriesByTab[active.id]?.submittedSql === active.sqlDraft ? state.queriesByTab[active.id]?.error : undefined}
-                onChange={(sqlDraft) => state.setSqlDraft(active.id, sqlDraft)} onRun={(previewLimit) => void state.runSqlQuery(active.id, active.sqlDraft, previewLimit)}
+                onChange={(sqlDraft) => state.setSqlDraft(active.id, sqlDraft)} onRun={(previewLimit) => void state.runSqlQuery(active.id, active.sqlDraft, previewLimit, settings.batchSize)}
                 onHeightChange={(editorHeight) => state.setViewState(active.id, { editorHeight })} />
             </div>}
             <QueryResultPane key={`result-${active.id}`} query={state.queriesByTab[active.id]}
@@ -123,6 +144,7 @@ export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps)
           </div>
         </section> : <section className="workspace-placeholder"><div className="opened-file-card"><span className={`opened-status ${active?.status}`} aria-hidden="true" /><div><strong>{active?.status === 'loading' ? 'Loading file…' : active?.status === 'unavailable' ? 'File unavailable' : 'Could not open file'}</strong><p>{active?.path}</p><span className="file-state">{active?.status}</span>{active?.status !== 'loading' && <button onClick={() => state.openPaths([active.path])}>Retry</button>}</div></div></section>}
       </>}
+      {settingsOpen && <SettingsDialog settings={settings} onSave={saveSettings} pickDirectory={api.pickDirectory} onClose={() => setSettingsOpen(false)} />}
     </main>
   )
 }

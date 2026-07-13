@@ -34,7 +34,7 @@ export interface WorkspaceState {
   reportError(key: string, error: unknown): void
   resume(): void
   openPaths(paths: string[]): Promise<void>
-  hydrate(): Promise<void>
+  hydrate(restoreTabs?: boolean): Promise<void>
   activateTab(id: string): void
   closeTab(id: string): Promise<void>
   closeOthers(id: string): Promise<void>
@@ -44,7 +44,7 @@ export interface WorkspaceState {
   setFilters(id: string, filters: SessionFilter[]): void
   setSorts(id: string, sorts: SessionSort[]): void
   setViewState(id: string, viewState: Partial<SessionViewState>): void
-  runFilterQuery(tabId: string, request: FilterQueryRequest): Promise<void>
+  runFilterQuery(tabId: string, request: FilterQueryRequest, batchSize?: number): Promise<void>
   runSqlQuery(tabId: string, sql: string, previewLimit?: number, batchSize?: number): Promise<void>
   loadNextBatch(tabId: string): Promise<void>
   cancelQuery(tabId: string): Promise<void>
@@ -219,9 +219,14 @@ export const createWorkspaceStore = (
       if (get().hydrationState !== 'ready') await get().hydrate()
       await openIntoWorkspace(paths)
     },
-    async hydrate() {
+    async hydrate(restoreTabs = true) {
       if (get().hydrationState === 'ready') return
       if (hydrating) return hydrating
+      if (!restoreTabs) {
+        set({ hydrationState: 'ready' })
+        hydrating = Promise.resolve()
+        return hydrating
+      }
       set({ hydrationState: 'loading' })
       hydrating = (async () => {
         try {
@@ -289,20 +294,24 @@ export const createWorkspaceStore = (
     setFilters(id, filters) { updateTabs(get().tabs.map((tab) => tab.id === id ? { ...tab, filters } : tab)) },
     setSorts(id, sorts) { updateTabs(get().tabs.map((tab) => tab.id === id ? { ...tab, sorts } : tab)) },
     setViewState(id, viewState) { updateTabs(get().tabs.map((tab) => tab.id === id ? { ...tab, viewState: { ...tab.viewState, ...viewState } } : tab)) },
-    async runFilterQuery(tabId, request) {
+    async runFilterQuery(tabId, request, batchSize = 500) {
       if (!canRunQuery(tabId)) return
-      if (!Number.isSafeInteger(request.previewLimit) || request.previewLimit < 1 || request.previewLimit > 10_000) {
-        beginInvalidQuery(tabId, 'filter', invalidArgument('Preview limit must be between 1 and 10000'))
+      if (!Number.isSafeInteger(request.previewLimit) || request.previewLimit < 1 || request.previewLimit > 100_000) {
+        beginInvalidQuery(tabId, 'filter', invalidArgument('Preview limit must be between 1 and 100000'))
         return
       }
-      await runQuery(tabId, 'filter', request.previewLimit, 500, (tab) => api.startFilterQuery({ fileId: tab.fileId, query: request, batchSize: 500 }), undefined, request)
+      if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 5_000) {
+        beginInvalidQuery(tabId, 'filter', invalidArgument('Batch size must be between 1 and 5000'))
+        return
+      }
+      await runQuery(tabId, 'filter', request.previewLimit, batchSize, (tab) => api.startFilterQuery({ fileId: tab.fileId, query: request, batchSize }), undefined, request)
     },
     async runSqlQuery(tabId, sql, previewLimit = 10_000, batchSize = 500) {
       if (!canRunQuery(tabId)) return
       if (sql.trim().length === 0) { beginInvalidQuery(tabId, 'sql', invalidArgument('SQL query must not be empty'), sql); return }
       if (utf8.encode(sql).length > 256 * 1024) { beginInvalidQuery(tabId, 'sql', invalidArgument('SQL query must not exceed 256 KiB'), sql); return }
-      if (!Number.isSafeInteger(previewLimit) || previewLimit < 1 || previewLimit > 10_000) {
-        beginInvalidQuery(tabId, 'sql', invalidArgument('Preview limit must be between 1 and 10000'), sql); return
+      if (!Number.isSafeInteger(previewLimit) || previewLimit < 1 || previewLimit > 100_000) {
+        beginInvalidQuery(tabId, 'sql', invalidArgument('Preview limit must be between 1 and 100000'), sql); return
       }
       if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 5_000) {
         beginInvalidQuery(tabId, 'sql', invalidArgument('Batch size must be between 1 and 5000'), sql); return

@@ -5,12 +5,13 @@ pub(crate) mod worker;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use duckdb::InterruptHandle;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tauri::State;
 use uuid::Uuid;
 
@@ -21,15 +22,16 @@ use crate::filters::{BoundValue, compile_filter_query};
 use crate::models::{
     ColumnSchema, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted,
 };
-use admission::{Admission, AdmissionPermit};
+use crate::settings::RuntimeSettings;
+use admission::{Admission, AdmissionPermit, ExecutionGate, ExecutionPermit};
 pub(crate) use sql_policy::validate_user_sql;
 use worker::worker_loop;
 
 const MAX_BATCH_SIZE: u32 = 5_000;
 const MAX_PREVIEW_LIMIT: u32 = 100_000;
 const MAX_SQL_BYTES: usize = 256 * 1024;
-const WORKER_COUNT: usize = 2;
-const JOB_QUEUE_CAPACITY: usize = 2;
+const WORKER_COUNT: usize = 4;
+const JOB_QUEUE_CAPACITY: usize = 4;
 const REPLACEMENT_QUEUE_CAPACITY: usize = 1;
 const BATCH_QUEUE_CAPACITY: usize = 2;
 
@@ -42,6 +44,7 @@ struct Cursor {
     cancelled: Arc<AtomicBool>,
     interrupt: Arc<Mutex<Option<Arc<InterruptHandle>>>>,
     _permit: Arc<AdmissionPermit>,
+    execution: Option<Weak<ExecutionPermit>>,
 }
 
 pub(super) struct QueryJob {
@@ -59,8 +62,10 @@ pub(super) struct QueryJob {
     cancelled: Arc<AtomicBool>,
     interrupt: Arc<Mutex<Option<Arc<InterruptHandle>>>>,
     _permit: Arc<AdmissionPermit>,
+    _execution: Arc<ExecutionPermit>,
     panic_for_test: bool,
     counters: Arc<WorkerCounters>,
+    runtime_settings: RuntimeSettings,
 }
 
 #[derive(Default)]
@@ -77,6 +82,8 @@ pub struct QueryService {
     replacement_jobs: Sender<QueryJob>,
     admission: Arc<Admission>,
     counters: Arc<WorkerCounters>,
+    execution_gate: Arc<ExecutionGate>,
+    runtime_settings: Arc<RwLock<RuntimeSettings>>,
 }
 
 impl Default for QueryService {
@@ -84,6 +91,7 @@ impl Default for QueryService {
         let (jobs, receiver) = bounded::<QueryJob>(JOB_QUEUE_CAPACITY);
         let (replacement_jobs, replacement_receiver) =
             bounded::<QueryJob>(REPLACEMENT_QUEUE_CAPACITY);
+        let execution_gate = Arc::new(ExecutionGate::new(2));
         for index in 0..WORKER_COUNT {
             let receiver = receiver.clone();
             let replacement_receiver = replacement_receiver.clone();
@@ -99,11 +107,18 @@ impl Default for QueryService {
             replacement_jobs,
             admission: Arc::new(Admission::default()),
             counters: Arc::new(WorkerCounters::default()),
+            execution_gate,
+            runtime_settings: Arc::new(RwLock::new(RuntimeSettings::default())),
         }
     }
 }
 
 impl QueryService {
+    pub(crate) fn update_settings(&self, settings: RuntimeSettings) {
+        self.execution_gate.set_limit(settings.concurrency);
+        *self.runtime_settings.write() = settings;
+    }
+
     pub fn start_query(
         &self,
         request: QueryRequest,
@@ -205,7 +220,13 @@ impl QueryService {
             cursors
                 .iter()
                 .find(|(_, cursor)| cursor.file_id == file_id)
-                .map(|(id, cursor)| (id.clone(), cursor._permit.clone()))
+                .map(|(id, cursor)| {
+                    (
+                        id.clone(),
+                        cursor._permit.clone(),
+                        cursor.execution.as_ref().and_then(Weak::upgrade),
+                    )
+                })
         };
         let _replacement_guard = if replacement.is_some() {
             Some(self.replacement_gate.try_lock().ok_or_else(|| {
@@ -214,16 +235,22 @@ impl QueryService {
         } else {
             None
         };
-        let replacement = if let Some((expected_id, _)) = replacement {
+        let replacement = if let Some((expected_id, _, _)) = replacement {
             let cursors = self.cursors.lock();
             cursors
                 .get(&expected_id)
                 .filter(|cursor| cursor.file_id == file_id)
-                .map(|cursor| (expected_id, cursor._permit.clone()))
+                .map(|cursor| {
+                    (
+                        expected_id,
+                        cursor._permit.clone(),
+                        cursor.execution.as_ref().and_then(Weak::upgrade),
+                    )
+                })
         } else {
             None
         };
-        let permit = if let Some((_, permit)) = &replacement {
+        let permit = if let Some((_, permit, _)) = &replacement {
             permit.clone()
         } else {
             self.admission.try_acquire().ok_or_else(|| {
@@ -245,8 +272,29 @@ impl QueryService {
                     cancelled: cancelled.clone(),
                     interrupt: interrupt.clone(),
                     _permit: permit.clone(),
+                    execution: None,
                 },
             );
+        }
+        let execution = if let Some((_, _, Some(execution))) = &replacement {
+            execution.clone()
+        } else {
+            match self.execution_gate.acquire(&cancelled) {
+                Some(execution) => execution,
+                None => {
+                    if let Some(cursor) = self.cursors.lock().remove(&query_id) {
+                        cancel_cursor(cursor);
+                    }
+                    return Err(AppError::Cancelled("The query was cancelled".into()));
+                }
+            }
+        };
+        if replacement.is_none() {
+            let mut cursors = self.cursors.lock();
+            let Some(cursor) = cursors.get_mut(&query_id) else {
+                return Err(AppError::Cancelled("The query was cancelled".into()));
+            };
+            cursor.execution = Some(Arc::downgrade(&execution));
         }
         let job = QueryJob {
             query_id: query_id.clone(),
@@ -263,8 +311,10 @@ impl QueryService {
             cancelled: cancelled.clone(),
             interrupt: interrupt.clone(),
             _permit: permit.clone(),
+            _execution: execution.clone(),
             panic_for_test,
             counters: self.counters.clone(),
+            runtime_settings: self.runtime_settings.read().clone(),
         };
         self.counters.queued.fetch_add(1, Ordering::AcqRel);
         let sender = if replacement.is_some() {
@@ -286,7 +336,7 @@ impl QueryService {
                 }
             };
         }
-        if let Some((expected_id, _)) = replacement {
+        if let Some((expected_id, _, _)) = replacement {
             let displaced = {
                 let mut cursors = self.cursors.lock();
                 if !matches!(cursors.get(&expected_id), Some(cursor) if cursor.file_id == file_id) {
@@ -304,6 +354,7 @@ impl QueryService {
                         cancelled: cancelled.clone(),
                         interrupt: interrupt.clone(),
                         _permit: permit,
+                        execution: Some(Arc::downgrade(&execution)),
                     },
                 );
                 displaced
@@ -358,6 +409,13 @@ impl QueryService {
             .filter(|(_, cursor)| cursor.file_id == file_id)
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
+        for query_id in query_ids {
+            let _ = self.cancel_query(&query_id);
+        }
+    }
+
+    pub fn cancel_all(&self) {
+        let query_ids = self.cursors.lock().keys().cloned().collect::<Vec<_>>();
         for query_id in query_ids {
             let _ = self.cancel_query(&query_id);
         }

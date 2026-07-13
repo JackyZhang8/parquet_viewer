@@ -5,6 +5,7 @@ pub mod filters;
 pub mod models;
 pub mod query;
 pub mod session;
+pub mod settings;
 
 use std::path::PathBuf;
 
@@ -14,37 +15,50 @@ pub struct AppState {
     pub exports: export::ExportService,
     pub files: files::FileRegistry,
     pub queries: query::QueryService,
+    pub settings: settings::SettingsStore,
     pub sessions: session::SessionStore,
 }
 
 impl AppState {
-    fn with_session_path(path: PathBuf) -> Self {
+    fn with_config_paths(session_path: PathBuf, settings_path: PathBuf) -> Self {
+        let settings = settings::SettingsStore::new(settings_path);
+        let runtime = settings.load().runtime();
+        let exports = export::ExportService::default();
+        exports.update_settings(runtime.clone());
+        let queries = query::QueryService::default();
+        queries.update_settings(runtime);
         Self {
-            exports: export::ExportService::default(),
+            exports,
             files: files::FileRegistry::default(),
-            queries: query::QueryService::default(),
-            sessions: session::SessionStore::new(path),
+            queries,
+            settings,
+            sessions: session::SessionStore::new(session_path),
         }
     }
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::with_session_path(std::env::temp_dir().join(format!(
-            "parquet-viewer-test-session-{}.json",
-            uuid::Uuid::new_v4()
-        )))
+        let id = uuid::Uuid::new_v4();
+        let base = std::env::temp_dir();
+        Self::with_config_paths(
+            base.join(format!("parquet-viewer-test-session-{id}.json")),
+            base.join(format!("parquet-viewer-test-settings-{id}.json")),
+        )
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let session_path = app.path().app_config_dir()?.join("session.json");
-            app.manage(AppState::with_session_path(session_path));
+            let config_dir = app.path().app_config_dir()?;
+            app.manage(AppState::with_config_paths(
+                config_dir.join("session.json"),
+                config_dir.join("settings.json"),
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -57,9 +71,18 @@ pub fn run() {
             query::cancel_query,
             export::start_export,
             export::cancel_export,
+            settings::load_settings,
+            settings::save_settings,
             session::load_session,
             session::save_session
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Parquet Viewer");
+        .build(tauri::generate_context!())
+        .expect("failed to build Parquet Viewer");
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            let state = app_handle.state::<AppState>();
+            state.queries.cancel_all();
+            state.exports.cancel_all();
+        }
+    });
 }

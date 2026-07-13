@@ -4,10 +4,10 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { ask, open, save } from '@tauri-apps/plugin-dialog'
 import { revealItemInDir as reveal } from '@tauri-apps/plugin-opener'
 import type {
-  AppError, ExportProgress, ExportRequest, ExportStarted, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted, RestoredSession,
+  AppError, AppSettings, ExportProgress, ExportRequest, ExportStarted, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted, RestoredSession,
   SessionSnapshot,
 } from '../domain/types'
-import { isAppError, isExportProgress, isQueryBatch, isSessionScalar } from '../domain/types'
+import { isAppError, isAppSettings, isExportProgress, isQueryBatch, isSessionScalar } from '../domain/types'
 
 export type OpenFileOutcome =
   | { ok: true; metadata: FileMetadata }
@@ -25,6 +25,9 @@ export interface DesktopApi {
   onExportProgress(callback: (progress: ExportProgress) => void): Promise<() => void>
   pickCsvDestination(suggestedName: string): Promise<string | null>
   confirmExportOverwrite(path: string): Promise<boolean>
+  loadSettings(): Promise<AppSettings>
+  saveSettings(settings: AppSettings): Promise<AppSettings>
+  pickDirectory(): Promise<string | null>
   loadSession(): Promise<RestoredSession>
   saveSession(snapshot: SessionSnapshot): Promise<void>
   pickParquetFiles(): Promise<string[] | null>
@@ -88,6 +91,11 @@ const queryBatch = (value: unknown): QueryBatch => {
 const exportStarted = (value: unknown): ExportStarted => {
   if (!record(value) || !exactKeys(value, ['exportId']) || typeof value.exportId !== 'string' || value.exportId.length === 0) throw internalError()
   return value as unknown as ExportStarted
+}
+
+const appSettings = (value: unknown): AppSettings => {
+  if (!isAppSettings(value)) throw internalError()
+  return value
 }
 
 export const normalizeOpenOutcomes = (value: unknown): OpenFileOutcome[] => {
@@ -172,6 +180,16 @@ export const desktopApi: DesktopApi = {
   },
   pickCsvDestination: (suggestedName) => save({ defaultPath: suggestedName, filters: [{ name: 'CSV', extensions: ['csv'] }] }),
   confirmExportOverwrite: (path) => ask(`Replace the existing file?\n${path}`, { title: 'Replace CSV export', kind: 'warning' }),
+  async loadSettings() {
+    return appSettings(await invoke('load_settings'))
+  },
+  async saveSettings(settings) {
+    return appSettings(await invoke('save_settings', { settings }))
+  },
+  async pickDirectory() {
+    const selected = await open({ directory: true, multiple: false })
+    return Array.isArray(selected) ? selected[0] ?? null : selected
+  },
   async loadSession() {
     return restoredSession(await invoke('load_session'))
   },

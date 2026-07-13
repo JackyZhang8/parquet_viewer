@@ -133,7 +133,10 @@ struct JobCleanup<'a>(&'a QueryJob);
 impl Drop for JobCleanup<'_> {
     fn drop(&mut self) {
         *self.0.interrupt.lock() = None;
-        let _ = fs::remove_dir_all(query_temp_directory(&self.0.query_id));
+        let _ = fs::remove_dir_all(query_temp_directory(
+            &self.0.runtime_settings,
+            &self.0.query_id,
+        ));
     }
 }
 
@@ -141,7 +144,7 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
     if job.panic_for_test {
         panic!("injected query worker panic");
     }
-    let connection = open_configured_connection(&job.query_id)?;
+    let connection = open_configured_connection(&job.query_id, &job.runtime_settings)?;
     *job.interrupt.lock() = Some(connection.interrupt_handle());
     if job.cancelled.load(Ordering::Acquire) {
         let _ = job
@@ -290,16 +293,21 @@ fn batch_resource_exhausted() -> AppError {
     AppError::ResourceExhausted("A query batch exceeds the configured memory limit".into())
 }
 
-pub(crate) fn open_configured_connection(query_id: &str) -> Result<Connection, AppError> {
-    let temp_directory = query_temp_directory(query_id);
+pub(crate) fn open_configured_connection(
+    query_id: &str,
+    settings: &crate::settings::RuntimeSettings,
+) -> Result<Connection, AppError> {
+    let temp_directory = query_temp_directory(settings, query_id);
+    ensure_disk_threshold(&temp_directory, settings.temp_disk_warning_mb)?;
     fs::create_dir_all(&temp_directory)
         .map_err(|error| AppError::Internal(format!("create query temp directory: {error}")))?;
     let temp = temp_directory
         .to_str()
         .ok_or_else(|| AppError::InvalidPath("Query temp path is not valid UTF-8".into()))?;
+    let memory_limit = format!("{}MB", settings.memory_limit_mb);
     let config = Config::default()
         .enable_autoload_extension(false)
-        .and_then(|config| config.max_memory("512MB"))
+        .and_then(|config| config.max_memory(&memory_limit))
         .and_then(|config| config.threads(2))
         .and_then(|config| config.with("preserve_insertion_order", "false"))
         .and_then(|config| config.with("allow_unsigned_extensions", "false"))
@@ -309,8 +317,49 @@ pub(crate) fn open_configured_connection(query_id: &str) -> Result<Connection, A
     Connection::open_in_memory_with_flags(config).map_err(internal_duckdb)
 }
 
-fn query_temp_directory(query_id: &str) -> PathBuf {
-    std::env::temp_dir().join("parquet-viewer").join(query_id)
+pub(crate) fn query_temp_directory(
+    settings: &crate::settings::RuntimeSettings,
+    query_id: &str,
+) -> PathBuf {
+    settings
+        .temp_directory
+        .clone()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("parquet-viewer")
+        .join(query_id)
+}
+
+fn ensure_disk_threshold(path: &Path, warning_mb: u32) -> Result<(), AppError> {
+    let base = path.parent().unwrap_or(path);
+    fs::create_dir_all(base)
+        .map_err(|error| AppError::Internal(format!("create query temp base: {error}")))?;
+    if let Some(bytes) = available_space(base)
+        && bytes < u64::from(warning_mb) * 1024 * 1024
+    {
+        return Err(AppError::ResourceExhausted(
+            "The temporary directory is below the configured free-space warning threshold".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn available_space(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stats = unsafe { stats.assume_init() };
+    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize))
+}
+
+#[cfg(not(unix))]
+fn available_space(_path: &Path) -> Option<u64> {
+    None
 }
 
 pub(crate) fn create_data_view(
@@ -380,7 +429,10 @@ mod tests {
 
     use crossbeam_channel::bounded;
 
-    use super::{open_configured_connection, receive_fair, restrict_external_access};
+    use super::{
+        open_configured_connection, query_temp_directory, receive_fair, restrict_external_access,
+    };
+    use crate::settings::{AppSettings, Theme};
 
     #[test]
     fn ready_normal_job_runs_after_at_most_one_replacement() {
@@ -404,7 +456,19 @@ mod tests {
     #[test]
     fn config_sets_temp_limit_and_external_access_can_be_disabled() {
         let query_id = uuid::Uuid::new_v4().to_string();
-        let connection = open_configured_connection(&query_id).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let runtime = AppSettings {
+            theme: Theme::System,
+            batch_size: 500,
+            preview_limit: 10_000,
+            memory_limit_mb: 256,
+            temp_directory: Some(base.path().to_string_lossy().into_owned()),
+            temp_disk_warning_mb: 128,
+            concurrency: 2,
+            restore_tabs: true,
+        }
+        .runtime();
+        let connection = open_configured_connection(&query_id, &runtime).unwrap();
         let temp_limit: String = connection
             .query_row(
                 "SELECT current_setting('max_temp_directory_size')::VARCHAR",
@@ -413,6 +477,25 @@ mod tests {
             )
             .unwrap();
         assert!(!temp_limit.is_empty());
+        let configured_temp: String = connection
+            .query_row(
+                "SELECT current_setting('temp_directory')::VARCHAR",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            configured_temp,
+            query_temp_directory(&runtime, &query_id).to_string_lossy()
+        );
+        let memory_limit: String = connection
+            .query_row(
+                "SELECT current_setting('memory_limit')::VARCHAR",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(memory_limit, "512.0 MiB");
         let directory = tempfile::tempdir().unwrap();
         let allowed = directory.path().join("allowed.csv");
         fs::write(&allowed, "id\n1\n").unwrap();

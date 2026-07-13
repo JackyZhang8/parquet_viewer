@@ -15,6 +15,7 @@ interface Props {
   onChange(value: string): void
   onRun(previewLimit: number): void
   onHeightChange(height: number): void
+  initialPreviewLimit?: number
 }
 
 const MIN_HEIGHT = 120
@@ -80,7 +81,7 @@ export const columnNameAtPosition = (line: string, column: number): string | nul
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(word) ? word : null
 }
 
-export function SqlEditor({ tabId, fileId, value, columns, height, error, onChange, onRun, onHeightChange }: Props) {
+export function SqlEditor({ tabId, fileId, value, columns, height, error, onChange, onRun, onHeightChange, initialPreviewLimit = 10_000 }: Props) {
   const uri = useMemo(() => `parquet-sql://${encodeURIComponent(fileId)}/${encodeURIComponent(tabId)}`, [fileId, tabId])
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null)
@@ -90,9 +91,11 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
   const valueRef = useRef(value); valueRef.current = value
   const onRunRef = useRef(onRun); onRunRef.current = onRun
   const [mounted, setMounted] = useState(0)
-  const [previewLimit, setPreviewLimit] = useState(10_000)
+  const [previewLimit, setPreviewLimit] = useState(initialPreviewLimit)
   const [copyFeedback, setCopyFeedback] = useState<'success' | 'error' | null>(null)
   const dark = typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches
+
+  useEffect(() => setPreviewLimit(initialPreviewLimit), [initialPreviewLimit])
 
   const clearMarkers = () => {
     const model = editorRef.current?.getModel()
@@ -209,7 +212,7 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
   return <section className="sql-editor-shell" style={{ height: clampHeight(height) }}>
     <div className="sql-toolbar">
       <strong>SQL</strong><span>Table: <code>data</code></span>
-      <label>Preview rows <input aria-label="SQL preview rows" type="number" min={1} max={10_000} value={previewLimit}
+      <label>Preview rows <input aria-label="SQL preview rows" type="number" min={1} max={100_000} value={previewLimit}
         onChange={(event) => setPreviewLimit(Number(event.target.value))} /></label>
       <button type="button" onClick={format}>Format SQL</button>
       <button type="button" className="primary-button" onClick={run}>Run SQL</button>

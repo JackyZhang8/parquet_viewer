@@ -99,7 +99,7 @@ describe('buildFilterQueryRequest', () => {
 
   it('rejects limits, duplicate sorts, unknown columns, and incompatible conditions', () => {
     expect(() => buildFilterQueryRequest(columns, [], [], 0)).toThrow(/preview/i)
-    expect(() => buildFilterQueryRequest(columns, [], [], 10001)).toThrow(/10000/)
+    expect(() => buildFilterQueryRequest(columns, [], [], 100001)).toThrow(/100000/)
     expect(() => buildFilterQueryRequest(columns, [], [{column:'id',direction:'asc'},{column:'id',direction:'desc'}], 1)).toThrow(/duplicate/i)
     expect(() => buildFilterQueryRequest(columns, [{column:'nested',operator:'eq',value:{type:'string',value:'x'}}], [], 1)).toThrow(/incompatible/i)
     expect(() => buildFilterQueryRequest(columns, [{column:'missing',operator:'isNull',value:{type:'null'}}], [], 1)).toThrow(/unknown/i)

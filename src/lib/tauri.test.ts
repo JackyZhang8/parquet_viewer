@@ -102,6 +102,22 @@ it('runs the export lifecycle, validates progress events, and uses native save c
   ])
 })
 
+it('loads and saves exact settings and selects a native directory', async () => {
+  const settings = { theme: 'dark' as const, batchSize: 500, previewLimit: 10000, memoryLimitMb: 512,
+    tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: true }
+  invoke.mockResolvedValueOnce(settings).mockResolvedValueOnce(settings)
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  vi.mocked(open).mockResolvedValue('/tmp/queries')
+
+  await expect(desktopApi.loadSettings()).resolves.toEqual(settings)
+  await expect(desktopApi.saveSettings(settings)).resolves.toEqual(settings)
+  await expect(desktopApi.pickDirectory()).resolves.toBe('/tmp/queries')
+  expect(invoke.mock.calls).toEqual([
+    ['load_settings'],
+    ['save_settings', { settings }],
+  ])
+})
+
 it.each([
   ['started extra key', { queryId: 'q', columns: [], hidden: true }, 'start'],
   ['started empty query id', { queryId: '', columns: [] }, 'start'],
