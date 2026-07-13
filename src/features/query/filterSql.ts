@@ -2,15 +2,15 @@ import type { ColumnSchema, FilterOperator, FilterQueryRequest, SessionFilter, S
 import { sessionDecimal, sessionInteger } from '../../domain/types'
 
 export type ColumnFamily =
-  | { kind: 'boolean' | 'text' | 'temporal' | 'float' | 'unsupported' }
-  | { kind: 'signedInteger' | 'unsignedInteger'; bits: 8 | 16 | 32 | 64 }
+  | { kind: 'boolean' | 'text' | 'temporal' | 'float' | 'binary' | 'nested' | 'unsupported' }
+  | { kind: 'signedInteger' | 'unsignedInteger' }
   | { kind: 'decimal'; precision: number; scale: number }
 
 const integerFamily = (type: string): ColumnFamily | undefined => {
   const plain = /^(U?)INT(8|16|32|64)$/.exec(type)
-  if (plain) return { kind: plain[1] ? 'unsignedInteger' : 'signedInteger', bits: Number(plain[2]) as 8|16|32|64 }
+  if (plain) return { kind: plain[1] ? 'unsignedInteger' : 'signedInteger' }
   const debug = /^INTEGER \{ BIT_WIDTH: (8|16|32|64), IS_SIGNED: (TRUE|FALSE) \}$/.exec(type)
-  if (debug) return { kind: debug[2] === 'TRUE' ? 'signedInteger' : 'unsignedInteger', bits: Number(debug[1]) as 8|16|32|64 }
+  if (debug) return { kind: debug[2] === 'TRUE' ? 'signedInteger' : 'unsignedInteger' }
 }
 
 export const columnFamily = (column: ColumnSchema): ColumnFamily => {
@@ -20,6 +20,8 @@ export const columnFamily = (column: ColumnSchema): ColumnFamily => {
   if (type === 'DATE' || type === 'INT96' || /^TIME(?:STAMP)?_(?:MILLIS|MICROS|NANOS)$/.test(type) ||
     /^TIME \{ IS_ADJUSTED_TO_U_T_C: (?:TRUE|FALSE), UNIT: (?:MILLIS|MICROS|NANOS) \}$/.test(type)) return { kind: 'temporal' }
   if (type === 'FLOAT' || type === 'DOUBLE') return { kind: 'float' }
+  if (['BINARY','FIXED_BINARY','BLOB'].includes(type)) return { kind: 'binary' }
+  if (['STRUCT','LIST','MAP','ARRAY','UNION'].includes(type)) return { kind: 'nested' }
   const integer = integerFamily(type)
   if (integer) return integer
   const decimal = /^DECIMAL\((\d+),(\d+)\)$/.exec(type)
@@ -41,13 +43,12 @@ export const operatorsFor = (column: ColumnSchema): FilterOperator[] => {
   }
 }
 
-const integerRange = (value: string, signed: boolean, bits: number) => {
+const integerRange = (value: string, signed: boolean) => {
   let parsed: bigint
   try { parsed = BigInt(value) } catch { throw new Error('Integer must use canonical decimal syntax') }
-  const one = BigInt(1)
-  const max = signed ? (one << BigInt(bits - 1)) - one : (one << BigInt(bits)) - one
-  const min = signed ? -(one << BigInt(bits - 1)) : BigInt(0)
-  if (parsed < min || parsed > max) throw new Error(`Integer is outside the ${signed ? 'signed' : 'unsigned'} ${bits}-bit range`)
+  const max = BigInt(signed ? '9223372036854775807' : '18446744073709551615')
+  const min = signed ? BigInt('-9223372036854775808') : BigInt(0)
+  if (parsed < min || parsed > max) throw new Error(`Integer is outside the supported ${signed ? 'signed i64' : 'unsigned u64'} range`)
 }
 
 export const convertEditorValue = (column: ColumnSchema, raw: string): SessionScalar => {
@@ -57,9 +58,8 @@ export const convertEditorValue = (column: ColumnSchema, raw: string): SessionSc
       if (raw !== 'true' && raw !== 'false') throw new Error('Boolean value must be true or false')
       return { type: 'boolean', value: raw === 'true' }
     case 'signedInteger': case 'unsignedInteger': {
-      const scalar = sessionInteger(raw)
-      integerRange(raw, family.kind === 'signedInteger', family.bits)
-      return scalar
+      integerRange(raw, family.kind === 'signedInteger')
+      return sessionInteger(raw)
     }
     case 'decimal': {
       const scalar = sessionDecimal(raw)
@@ -113,7 +113,10 @@ export const buildFilterQueryRequest = (columns: ColumnSchema[], filters: Sessio
     if (!column) throw new Error(`Filter references unknown column “${filter.column}”`)
     if (!operatorsFor(column).includes(filter.operator)) throw new Error(`Operator is incompatible with “${filter.column}”`)
     if (filter.operator === 'isNull' || filter.operator === 'isNotNull') return { column: filter.column, operator: filter.operator }
-    if (filter.value.type === 'null') throw new Error(`Filter value is incompatible with “${filter.column}”`)
+    if (filter.value.type === 'null') {
+      if (filter.operator === 'eq' || filter.operator === 'notEq') return { column: filter.column, operator: filter.operator, value: filter.value }
+      throw new Error('Null is only valid with equality operators')
+    }
     validateScalar(column, filter.value)
     return { column: filter.column, operator: filter.operator, value: filter.value }
   })

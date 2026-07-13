@@ -18,6 +18,17 @@ it('shows file counters and searches schema fields', async () => {
   expect(screen.getByText('created_at')).toBeInTheDocument()
 })
 
+it('labels binary and nested fields distinctly from unsupported fields', () => {
+  render(<SchemaPanel metadata={{...metadata,columns:[
+    {name:'payload',logicalType:'BINARY',nullable:true},
+    {name:'items',logicalType:'LIST',nullable:true},
+    {name:'mystery',logicalType:'MYSTERY',nullable:true},
+  ]}} width={260} onWidthChange={vi.fn()} onError={vi.fn()} />)
+  expect(screen.getByText(/BINARY · nullable · binary/)).toBeInTheDocument()
+  expect(screen.getByText(/LIST · nullable · nested/)).toBeInTheDocument()
+  expect(screen.getByText(/MYSTERY · nullable · unsupported/)).toBeInTheDocument()
+})
+
 it('copies a field and catches clipboard failure', async () => {
   const onError = vi.fn()
   Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })

@@ -12,7 +12,9 @@ describe('columnFamily', () => {
     ['INT64', 'signedInteger'], ['UINT64', 'unsignedInteger'], ['FLOAT', 'float'], ['DOUBLE', 'float'],
     ['INTEGER { BIT_WIDTH: 32, IS_SIGNED: TRUE }', 'signedInteger'],
     ['INTEGER { BIT_WIDTH: 64, IS_SIGNED: FALSE }', 'unsignedInteger'],
-    ['BINARY', 'unsupported'], ['STRUCT', 'unsupported'], ['DECIMAL(0,0)', 'unsupported'],
+    ['BINARY', 'binary'], ['FIXED_BINARY', 'binary'], ['BLOB', 'binary'],
+    ['STRUCT', 'nested'], ['LIST', 'nested'], ['MAP', 'nested'], ['ARRAY', 'nested'], ['UNION', 'nested'],
+    ['MYSTERY', 'unsupported'], ['DECIMAL(0,0)', 'unsupported'],
     ['DECIMAL(4,5)', 'unsupported'], ['DECIMAL(39,0)', 'unsupported'], ['decimal(9,2)', 'unsupported'],
   ])('%s maps to %s', (logicalType, family) => expect(columnFamily(col(logicalType)).kind).toBe(family))
 
@@ -25,6 +27,8 @@ it('exposes only backend-supported operators', () => {
   expect(operatorsFor(col('VARCHAR'))).toEqual(['eq','notEq','contains','startsWith','endsWith','lt','lte','gt','gte','isNull','isNotNull'])
   expect(operatorsFor(col('BOOLEAN'))).toEqual(['eq','notEq','isNull','isNotNull'])
   expect(operatorsFor(col('INT96'))).toEqual(['eq','notEq','lt','lte','gt','gte','isNull','isNotNull'])
+  expect(operatorsFor(col('BINARY'))).toEqual(['isNull','isNotNull'])
+  expect(operatorsFor(col('LIST'))).toEqual(['isNull','isNotNull'])
   expect(operatorsFor(col('STRUCT'))).toEqual(['isNull','isNotNull'])
 })
 
@@ -37,10 +41,12 @@ describe('convertEditorValue', () => {
     expect(convertEditorValue(col('DOUBLE'), '1.25')).toEqual({ type: 'number', value: 1.25 })
     expect(convertEditorValue(col('DOUBLE'), '9007199254740993')).toEqual({ type: 'integer', value: '9007199254740993' })
     expect(convertEditorValue(col('DATE'), '2026-07-12')).toEqual({ type: 'string', value: '2026-07-12' })
+    expect(convertEditorValue(col('INT8'), '128')).toEqual({ type: 'integer', value: '128' })
   })
 
   it.each([
-    ['UINT64', '-1', 'unsigned'], ['INT64', '9223372036854775808', 'signed'],
+    ['UINT64', '-1', 'unsigned'], ['INT8', '9223372036854775808', 'signed'],
+    ['UINT8', '18446744073709551616', 'unsigned'],
     ['DECIMAL(5,2)', '1234.00', 'precision'], ['DECIMAL(5,2)', '1.234', 'scale'],
     ['DOUBLE', 'Infinity', 'finite'], ['BOOLEAN', 'yes', 'boolean'], ['INT32', '01', 'canonical'],
   ])('rejects invalid %s input', (type, value, message) => {
@@ -59,6 +65,17 @@ describe('buildFilterQueryRequest', () => {
       selectedColumns: [], previewLimit: 500, sorts: [{ column: 'name', direction: 'desc' }],
       filters: [{ column: 'id', operator: 'gte', value: { type: 'integer', value: '4' } }, { column: 'name', operator: 'isNull' }],
     })
+  })
+
+  it('passes equality null scalars through for backend null rewriting', () => {
+    expect(buildFilterQueryRequest(columns, [
+      { column:'id', operator:'eq', value:{type:'null'} },
+      { column:'name', operator:'notEq', value:{type:'null'} },
+    ], [], 10).filters).toEqual([
+      { column:'id', operator:'eq', value:{type:'null'} },
+      { column:'name', operator:'notEq', value:{type:'null'} },
+    ])
+    expect(() => buildFilterQueryRequest(columns, [{column:'id',operator:'lt',value:{type:'null'}}], [], 10)).toThrow(/null.*equality/i)
   })
 
   it('rejects limits, duplicate sorts, unknown columns, and incompatible conditions', () => {

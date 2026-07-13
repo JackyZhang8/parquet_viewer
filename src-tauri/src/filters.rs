@@ -281,7 +281,7 @@ enum ColumnType {
 impl ColumnType {
     fn parse(logical_type: &str) -> Self {
         match logical_type {
-            "BOOLEAN" => Self::Boolean,
+            "BOOLEAN" | "BOOL" => Self::Boolean,
             "STRING" | "UTF8" | "VARCHAR" | "CHAR" => Self::Text,
             "DATE" | "TIME_MILLIS" | "TIME_MICROS" | "TIME_NANOS" | "TIMESTAMP_MILLIS"
             | "TIMESTAMP_MICROS" | "TIMESTAMP_NANOS" | "INT96" => Self::Temporal,

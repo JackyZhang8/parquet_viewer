@@ -12,7 +12,7 @@ interface Props {
 
 const count = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 const familyLabel = (kind: ReturnType<typeof columnFamily>['kind']) => {
-  const labels: Partial<Record<ReturnType<typeof columnFamily>['kind'], string>> = { signedInteger:'integer', unsignedInteger:'unsigned', unsupported:'other' }
+  const labels: Partial<Record<ReturnType<typeof columnFamily>['kind'], string>> = { signedInteger:'integer', unsignedInteger:'unsigned' }
   return labels[kind] ?? kind
 }
 

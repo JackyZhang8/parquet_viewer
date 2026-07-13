@@ -373,6 +373,7 @@ fn classifies_emitted_logical_types_exactly_and_treats_int96_as_temporal() {
 fn parses_only_supported_emitted_column_type_shapes() {
     let cases = [
         ("BOOLEAN", ColumnType::Boolean),
+        ("BOOL", ColumnType::Boolean),
         ("STRING", ColumnType::Text),
         ("INT96", ColumnType::Temporal),
         ("INT32", ColumnType::SignedInteger),
