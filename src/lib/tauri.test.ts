@@ -1,9 +1,10 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
+const { invoke, listen, save, ask } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn(), save: vi.fn(), ask: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
+vi.mock('@tauri-apps/api/event', () => ({ listen }))
 vi.mock('@tauri-apps/api/webview', () => ({ getCurrentWebview: vi.fn() }))
-vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save, ask }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ revealItemInDir: vi.fn() }))
 
 import { desktopApi, normalizeOpenOutcomes } from './tauri'
@@ -19,7 +20,7 @@ const tab = () => ({
   viewState: { scrollTop: 0, scrollLeft: 2, sidebarWidth: 240, editorHeight: 180 },
 })
 
-beforeEach(() => invoke.mockReset())
+beforeEach(() => { invoke.mockReset(); listen.mockReset(); save.mockReset(); ask.mockReset() })
 
 it('accepts exact tagged open outcomes', () => {
   const error = { code: 'INVALID_PARQUET', message: 'Bad footer', detail: null }
@@ -73,6 +74,32 @@ it('invokes raw SQL with an exact QueryRequest and validates QueryStarted', asyn
 
   invoke.mockResolvedValue({ ...started, debug: '/private/path' })
   await expect(desktopApi.startQuery(request)).rejects.toEqual({ code: 'INTERNAL_ERROR', message: 'An internal error occurred', detail: null })
+})
+
+it('runs the export lifecycle, validates progress events, and uses native save confirmation', async () => {
+  const started = { exportId: 'export-1' }
+  invoke.mockResolvedValueOnce(started).mockResolvedValueOnce(undefined)
+  save.mockResolvedValue('/tmp/result.csv')
+  ask.mockResolvedValue(true)
+  let eventHandler: ((event: { payload: unknown }) => void) | undefined
+  const unlisten = vi.fn()
+  listen.mockImplementation(async (_event: string, handler: (event: { payload: unknown }) => void) => { eventHandler = handler; return unlisten })
+  const request = { fileId: 'file-1', destination: '/tmp/result.csv', overwrite: false, source: { kind: 'sql' as const, sql: 'SELECT * FROM data' } }
+
+  await expect(desktopApi.startExport(request)).resolves.toEqual(started)
+  await expect(desktopApi.cancelExport('export-1')).resolves.toBeUndefined()
+  await expect(desktopApi.pickCsvDestination('result.csv')).resolves.toBe('/tmp/result.csv')
+  await expect(desktopApi.confirmExportOverwrite('/tmp/result.csv')).resolves.toBe(true)
+  const progress = vi.fn()
+  await expect(desktopApi.onExportProgress(progress)).resolves.toBe(unlisten)
+  eventHandler?.({ payload: { exportId: 'export-1', status: 'completed', rowsWritten: '12', error: null } })
+  eventHandler?.({ payload: { exportId: 'export-1', status: 'completed', rowsWritten: 12, error: null } })
+
+  expect(progress).toHaveBeenCalledOnce()
+  expect(invoke.mock.calls).toEqual([
+    ['start_export', { request }],
+    ['cancel_export', { exportId: 'export-1' }],
+  ])
 })
 
 it.each([

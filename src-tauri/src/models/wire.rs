@@ -4,6 +4,8 @@ use std::fmt;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::error::AppError;
+
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 mod u64_decimal {
@@ -192,6 +194,48 @@ pub struct QueryBatch {
     pub returned_rows: u64,
     #[serde(with = "u64_decimal")]
     pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ExportSource {
+    Sql { sql: String },
+    Filter { query: super::FilterQueryRequest },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportRequest {
+    pub file_id: String,
+    pub destination: String,
+    pub overwrite: bool,
+    pub source: ExportSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportStarted {
+    pub export_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportStatus {
+    Queued,
+    Running,
+    Completed,
+    Cancelled,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProgress {
+    pub export_id: String,
+    pub status: ExportStatus,
+    #[serde(with = "u64_decimal")]
+    pub rows_written: u64,
+    pub error: Option<AppError>,
 }
 
 #[cfg(test)]

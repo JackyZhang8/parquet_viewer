@@ -1,12 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
-import { open } from '@tauri-apps/plugin-dialog'
+import { ask, open, save } from '@tauri-apps/plugin-dialog'
 import { revealItemInDir as reveal } from '@tauri-apps/plugin-opener'
 import type {
-  AppError, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted, RestoredSession,
+  AppError, ExportProgress, ExportRequest, ExportStarted, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted, RestoredSession,
   SessionSnapshot,
 } from '../domain/types'
-import { isAppError, isQueryBatch, isSessionScalar } from '../domain/types'
+import { isAppError, isExportProgress, isQueryBatch, isSessionScalar } from '../domain/types'
 
 export type OpenFileOutcome =
   | { ok: true; metadata: FileMetadata }
@@ -19,6 +20,11 @@ export interface DesktopApi {
   startQuery(request: QueryRequest): Promise<QueryStarted>
   fetchQueryBatch(queryId: string): Promise<QueryBatch>
   cancelQuery(queryId: string): Promise<void>
+  startExport(request: ExportRequest): Promise<ExportStarted>
+  cancelExport(exportId: string): Promise<void>
+  onExportProgress(callback: (progress: ExportProgress) => void): Promise<() => void>
+  pickCsvDestination(suggestedName: string): Promise<string | null>
+  confirmExportOverwrite(path: string): Promise<boolean>
   loadSession(): Promise<RestoredSession>
   saveSession(snapshot: SessionSnapshot): Promise<void>
   pickParquetFiles(): Promise<string[] | null>
@@ -77,6 +83,11 @@ const queryStarted = (value: unknown): QueryStarted => {
 const queryBatch = (value: unknown): QueryBatch => {
   if (!isQueryBatch(value)) throw internalError()
   return value
+}
+
+const exportStarted = (value: unknown): ExportStarted => {
+  if (!record(value) || !exactKeys(value, ['exportId']) || typeof value.exportId !== 'string' || value.exportId.length === 0) throw internalError()
+  return value as unknown as ExportStarted
 }
 
 export const normalizeOpenOutcomes = (value: unknown): OpenFileOutcome[] => {
@@ -150,6 +161,17 @@ export const desktopApi: DesktopApi = {
     return queryBatch(await invoke('fetch_query_batch', { queryId }))
   },
   cancelQuery: (queryId) => invoke('cancel_query', { queryId }),
+  async startExport(request) {
+    return exportStarted(await invoke('start_export', { request }))
+  },
+  cancelExport: (exportId) => invoke('cancel_export', { exportId }),
+  async onExportProgress(callback) {
+    return listen<unknown>('export-progress', ({ payload }) => {
+      if (isExportProgress(payload)) callback(payload)
+    })
+  },
+  pickCsvDestination: (suggestedName) => save({ defaultPath: suggestedName, filters: [{ name: 'CSV', extensions: ['csv'] }] }),
+  confirmExportOverwrite: (path) => ask(`Replace the existing file?\n${path}`, { title: 'Replace CSV export', kind: 'warning' }),
   async loadSession() {
     return restoredSession(await invoke('load_session'))
   },

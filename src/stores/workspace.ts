@@ -178,6 +178,7 @@ export const createWorkspaceStore = (
     tabId: string, source: 'filter' | 'sql', previewLimit: number, batchSize: number,
     start: (tab: WorkspaceTab) => Promise<{ queryId: string; columns: FileMetadata['columns'] }>,
     submittedSql?: string,
+    submittedFilter?: FilterQueryRequest,
   ) => {
     const tab = store.getState().tabs.find((item) => item.id === tabId)
     if (!tab || tab.status !== 'ready' || store.getState().activeTabId !== tabId) return
@@ -187,7 +188,7 @@ export const createWorkspaceStore = (
     const preserved = previous.hasSuccessfulResult ? previous : idleQueryState(previous.generation)
     store.setState((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
       ...preserved, status: 'queued', error: undefined, loadingBatch: false, done: false,
-      stale: previous.hasSuccessfulResult, generation, queryId: undefined, source, submittedSql,
+      stale: previous.hasSuccessfulResult, generation, queryId: undefined, source, submittedSql, submittedFilter,
     } } }))
     try {
       const started = await start(tab)
@@ -198,7 +199,7 @@ export const createWorkspaceStore = (
       }
       queryLimits.set(tabId, previewLimit)
       store.setState((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
-        ...idleQueryState(generation), status: 'running', queryId: started.queryId, columns: started.columns, source, submittedSql,
+        ...idleQueryState(generation), status: 'running', queryId: started.queryId, columns: started.columns, source, submittedSql, submittedFilter,
       } } }))
       await store.getState().loadNextBatch(tabId)
     } catch (error) {
@@ -294,7 +295,7 @@ export const createWorkspaceStore = (
         beginInvalidQuery(tabId, 'filter', invalidArgument('Preview limit must be between 1 and 10000'))
         return
       }
-      await runQuery(tabId, 'filter', request.previewLimit, 500, (tab) => api.startFilterQuery({ fileId: tab.fileId, query: request, batchSize: 500 }))
+      await runQuery(tabId, 'filter', request.previewLimit, 500, (tab) => api.startFilterQuery({ fileId: tab.fileId, query: request, batchSize: 500 }), undefined, request)
     },
     async runSqlQuery(tabId, sql, previewLimit = 10_000, batchSize = 500) {
       if (!canRunQuery(tabId)) return

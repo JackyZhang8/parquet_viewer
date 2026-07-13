@@ -34,6 +34,23 @@ pub fn compile_filter_query(
     schema: &[ColumnSchema],
     request: &FilterQueryRequest,
 ) -> Result<CompiledQuery, AppError> {
+    compile_filter_query_inner(file_path, schema, request, true)
+}
+
+pub fn compile_filter_export_query(
+    file_path: &str,
+    schema: &[ColumnSchema],
+    request: &FilterQueryRequest,
+) -> Result<CompiledQuery, AppError> {
+    compile_filter_query_inner(file_path, schema, request, false)
+}
+
+fn compile_filter_query_inner(
+    file_path: &str,
+    schema: &[ColumnSchema],
+    request: &FilterQueryRequest,
+    include_preview_limit: bool,
+) -> Result<CompiledQuery, AppError> {
     if !(1..=MAX_PREVIEW_LIMIT).contains(&request.preview_limit) {
         return invalid("Preview limit must be between 1 and 100000");
     }
@@ -69,10 +86,12 @@ pub fn compile_filter_query(
         sql.push_str(" ORDER BY ");
         sql.push_str(&order_by.join(", "));
     }
-    sql.push_str(" LIMIT ?");
-    params.push(BoundValue::UnsignedInteger(u64::from(
-        request.preview_limit + 1,
-    )));
+    if include_preview_limit {
+        sql.push_str(" LIMIT ?");
+        params.push(BoundValue::UnsignedInteger(u64::from(
+            request.preview_limit + 1,
+        )));
+    }
     Ok(CompiledQuery { sql, params })
 }
 

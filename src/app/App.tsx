@@ -7,7 +7,7 @@ import { SqlEditor } from '../features/query/SqlEditor'
 import { SchemaPanel } from '../features/schema/SchemaPanel'
 import { desktopApi, type DesktopApi } from '../lib/tauri'
 import { createWorkspaceStore, type WorkspaceState } from '../stores/workspace'
-import type { FilterQueryRequest } from '../domain/types'
+import { isAppError, type ExportProgress, type ExportSource, type FilterQueryRequest } from '../domain/types'
 import type { StoreApi } from 'zustand/vanilla'
 import { QueryResultPane } from './QueryResultPane'
 import './app.css'
@@ -18,9 +18,11 @@ export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps)
   const store = useMemo(() => suppliedStore ?? createWorkspaceStore(api), [api, suppliedStore])
   const state = useStore(store)
   const [queryModes, setQueryModes] = useState<Record<string, 'filter' | 'sql'>>({})
+  const [exportsByTab, setExportsByTab] = useState<Record<string, ExportProgress>>({})
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | undefined
+    let unlistenExport: (() => void) | undefined
     store.getState().resume()
     store.getState().hydrate().catch((error) => store.getState().reportError('Session restore', error))
     api.onFileDrop((paths) => {
@@ -28,7 +30,14 @@ export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps)
     }).then((cleanup) => {
       if (disposed) cleanup(); else unlisten = cleanup
     }).catch((error) => store.getState().reportError('File drop', error))
-    return () => { disposed = true; unlisten?.(); store.getState().dispose() }
+    api.onExportProgress((progress) => {
+      setExportsByTab((current) => {
+        const owner = Object.entries(current).find(([, item]) => item.exportId === progress.exportId)?.[0]
+        return owner ? { ...current, [owner]: progress } : current
+      })
+    }).then((cleanup) => { if (disposed) cleanup(); else unlistenExport = cleanup })
+      .catch((error) => store.getState().reportError('Export events', error))
+    return () => { disposed = true; unlisten?.(); unlistenExport?.(); store.getState().dispose() }
   }, [api, store, suppliedStore])
   const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0]
   const queryMode = active ? queryModes[active.id] ?? 'filter' : 'filter'
@@ -48,6 +57,39 @@ export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps)
     else if (event.key === 'Home') next = 'filter'
     else if (event.key === 'End') next = 'sql'
     if (next) { event.preventDefault(); selectQueryMode(next, true) }
+  }
+  const exportResult = async () => {
+    if (!active?.metadata) return
+    const query = state.queriesByTab[active.id]
+    if (!query?.hasSuccessfulResult || query.stale) return
+    let source: ExportSource | undefined
+    if (query.source === 'sql' && query.submittedSql) source = { kind: 'sql', sql: query.submittedSql }
+    if (query.source === 'filter' && query.submittedFilter) source = { kind: 'filter', query: query.submittedFilter }
+    if (!source) return
+    try {
+      const suggested = active.metadata.name.replace(/\.parquet$/i, '') + '.csv'
+      const destination = await api.pickCsvDestination(suggested)
+      if (!destination) return
+      let overwrite = false
+      let started
+      try {
+        started = await api.startExport({ fileId: active.fileId, destination, overwrite, source })
+      } catch (error) {
+        if (!isAppError(error) || error.code !== 'INVALID_ARGUMENT' || !/already exists/i.test(error.message) ||
+            !(await api.confirmExportOverwrite(destination))) throw error
+        overwrite = true
+        started = await api.startExport({ fileId: active.fileId, destination, overwrite, source })
+      }
+      setExportsByTab((current) => ({ ...current, [active.id]: { exportId: started.exportId, status: 'queued', rowsWritten: '0', error: null } }))
+    } catch (error) {
+      store.getState().reportError('CSV export', error)
+    }
+  }
+  const cancelExport = async () => {
+    if (!active) return
+    const progress = exportsByTab[active.id]
+    if (!progress || !['queued', 'running'].includes(progress.status)) return
+    try { await api.cancelExport(progress.exportId) } catch (error) { store.getState().reportError('Cancel export', error) }
   }
   return (
     <main className="app-shell">
@@ -76,7 +118,8 @@ export function App({ api = desktopApi, store: suppliedStore, onRun }: AppProps)
             <QueryResultPane key={`result-${active.id}`} query={state.queriesByTab[active.id]}
               initialScroll={{ top: active.viewState.scrollTop, left: active.viewState.scrollLeft }}
               onScrollChange={({ top: scrollTop, left: scrollLeft }) => state.setViewState(active.id, { scrollTop, scrollLeft })}
-              onLoadMore={() => void state.loadNextBatch(active.id)} onCancel={() => void state.cancelQuery(active.id)} />
+              onLoadMore={() => void state.loadNextBatch(active.id)} onCancel={() => void state.cancelQuery(active.id)}
+              exportProgress={exportsByTab[active.id]} onExport={() => void exportResult()} onCancelExport={() => void cancelExport()} />
           </div>
         </section> : <section className="workspace-placeholder"><div className="opened-file-card"><span className={`opened-status ${active?.status}`} aria-hidden="true" /><div><strong>{active?.status === 'loading' ? 'Loading file…' : active?.status === 'unavailable' ? 'File unavailable' : 'Could not open file'}</strong><p>{active?.path}</p><span className="file-state">{active?.status}</span>{active?.status !== 'loading' && <button onClick={() => state.openPaths([active.path])}>Retry</button>}</div></div></section>}
       </>}

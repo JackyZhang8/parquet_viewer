@@ -240,7 +240,7 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
     send_batch(job, &mut batch, true, false, returned_rows, started)
 }
 
-fn bound_to_duck_value(value: &BoundValue) -> Value {
+pub(crate) fn bound_to_duck_value(value: &BoundValue) -> Value {
     match value {
         BoundValue::Bool(value) => Value::Boolean(*value),
         BoundValue::SignedInteger(value) => Value::BigInt(*value),
@@ -290,7 +290,7 @@ fn batch_resource_exhausted() -> AppError {
     AppError::ResourceExhausted("A query batch exceeds the configured memory limit".into())
 }
 
-fn open_configured_connection(query_id: &str) -> Result<Connection, AppError> {
+pub(crate) fn open_configured_connection(query_id: &str) -> Result<Connection, AppError> {
     let temp_directory = query_temp_directory(query_id);
     fs::create_dir_all(&temp_directory)
         .map_err(|error| AppError::Internal(format!("create query temp directory: {error}")))?;
@@ -313,7 +313,10 @@ fn query_temp_directory(query_id: &str) -> PathBuf {
     std::env::temp_dir().join("parquet-viewer").join(query_id)
 }
 
-fn create_data_view(connection: &Connection, source: &QuerySource) -> Result<(), AppError> {
+pub(crate) fn create_data_view(
+    connection: &Connection,
+    source: &QuerySource,
+) -> Result<(), AppError> {
     let _fingerprint = &source.fingerprint_token;
     let path = quote_sql_string(&source.duckdb_path)?;
     connection
@@ -323,8 +326,22 @@ fn create_data_view(connection: &Connection, source: &QuerySource) -> Result<(),
         .map_err(|_| AppError::InvalidParquet("The Parquet file could not be queried".into()))
 }
 
-fn restrict_external_access(connection: &Connection, allowed_path: &Path) -> Result<(), AppError> {
-    let allowed = quote_sql_string(allowed_path)?;
+pub(crate) fn restrict_external_access(
+    connection: &Connection,
+    allowed_path: &Path,
+) -> Result<(), AppError> {
+    restrict_external_access_to_paths(connection, &[allowed_path])
+}
+
+pub(crate) fn restrict_external_access_to_paths(
+    connection: &Connection,
+    allowed_paths: &[&Path],
+) -> Result<(), AppError> {
+    let allowed = allowed_paths
+        .iter()
+        .map(|path| quote_sql_string(path))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(",");
     connection
         .execute_batch(&format!(
             "SET allowed_paths=[{allowed}]; SET enable_external_access=false"
@@ -332,14 +349,14 @@ fn restrict_external_access(connection: &Connection, allowed_path: &Path) -> Res
         .map_err(internal_duckdb)
 }
 
-fn quote_sql_string(path: &Path) -> Result<String, AppError> {
+pub(crate) fn quote_sql_string(path: &Path) -> Result<String, AppError> {
     let path = path
         .to_str()
         .ok_or_else(|| AppError::InvalidPath("Query source path is not valid UTF-8".into()))?;
     Ok(format!("'{}'", path.replace('\'', "''")))
 }
 
-fn safe_sql_error(error: duckdb::Error) -> AppError {
+pub(crate) fn safe_sql_error(error: duckdb::Error) -> AppError {
     let source = error.to_string();
     let lower = source.to_ascii_lowercase();
     if lower.contains("out of memory")

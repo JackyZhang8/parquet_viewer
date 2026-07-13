@@ -43,7 +43,7 @@ pub(super) const DENIED_EXTERNAL_FUNCTIONS: &[&str] = &[
     "query_table",
 ];
 
-pub(super) fn validate_user_sql(sql: &str) -> Result<String, AppError> {
+pub(crate) fn validate_user_sql(sql: &str) -> Result<String, AppError> {
     let statements = Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|error| {
         AppError::sql_with_source("The query has invalid SQL syntax", &error.to_string())
     })?;

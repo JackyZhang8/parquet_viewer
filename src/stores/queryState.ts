@@ -1,10 +1,11 @@
-import type { AppError, CellValue, ColumnSchema } from '../domain/types'
+import type { AppError, CellValue, ColumnSchema, FilterQueryRequest } from '../domain/types'
 
 export type QueryStatus = 'idle' | 'queued' | 'running' | 'done' | 'cancelled' | 'error'
 
 export interface QueryViewState {
   source?: 'filter' | 'sql'
   submittedSql?: string
+  submittedFilter?: FilterQueryRequest
   hasSuccessfulResult: boolean
   status: QueryStatus
   queryId?: string

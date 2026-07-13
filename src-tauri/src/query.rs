@@ -1,7 +1,7 @@
 mod admission;
 mod sql_policy;
 mod values;
-mod worker;
+pub(crate) mod worker;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use crate::models::{
     ColumnSchema, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted,
 };
 use admission::{Admission, AdmissionPermit};
-use sql_policy::validate_user_sql;
+pub(crate) use sql_policy::validate_user_sql;
 use worker::worker_loop;
 
 const MAX_BATCH_SIZE: u32 = 5_000;

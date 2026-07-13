@@ -1,7 +1,7 @@
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum AppError {
     #[error("{0}")]
     InvalidArgument(String),

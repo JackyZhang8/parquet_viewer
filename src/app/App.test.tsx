@@ -29,6 +29,11 @@ const api = (): DesktopApi => ({
   startQuery: vi.fn(async () => ({ queryId: 'sql-q', columns: [] })),
   fetchQueryBatch: vi.fn(async () => ({ queryId: 'q', rows: [], done: true, truncated: false, returnedRows: '0', elapsedMs: '0' })),
   cancelQuery: vi.fn(async () => undefined),
+  startExport: vi.fn(async () => ({ exportId: 'export-1' })),
+  cancelExport: vi.fn(async () => undefined),
+  onExportProgress: vi.fn(async () => () => undefined),
+  pickCsvDestination: vi.fn(async () => null),
+  confirmExportOverwrite: vi.fn(async () => false),
   loadSession: vi.fn(async () => ({ snapshot: { version: 1, tabs: [], activeTabId: null }, unavailableTabIds: [], warning: null })),
   saveSession: vi.fn(async () => undefined),
   pickParquetFiles: vi.fn(async () => null),
@@ -104,6 +109,37 @@ it('toggles SQL per tab, restores drafts/heights, runs into the same isolated gr
   await userEvent.click(screen.getByRole('tab', { name: /a.parquet/i }))
   expect(screen.getByRole('textbox', { name: 'SQL editor' })).toHaveValue('SELECT alpha FROM data')
   expect(screen.getByRole('gridcell', { name: /sql-a/ })).toBeInTheDocument()
+})
+
+it('exports the submitted SQL, confirms overwrite, and renders terminal export progress', async () => {
+  const desktop = api()
+  let exportEvent: ((progress: import('../domain/types').ExportProgress) => void) | undefined
+  vi.mocked(desktop.onExportProgress).mockImplementation(async (callback) => { exportEvent = callback; return () => undefined })
+  vi.mocked(desktop.pickCsvDestination).mockResolvedValue('/tmp/a.csv')
+  vi.mocked(desktop.confirmExportOverwrite).mockResolvedValue(true)
+  vi.mocked(desktop.startExport)
+    .mockRejectedValueOnce({ code: 'INVALID_ARGUMENT', message: 'Export destination already exists', detail: null })
+    .mockResolvedValueOnce({ exportId: 'export-1' })
+  vi.mocked(desktop.loadSession).mockResolvedValue({ snapshot: { version: 1, activeTabId: 'a', tabs: [
+    { id: 'a', fileId: 'a', path: '/a.parquet', sqlDraft: 'SELECT id FROM data', filters: [], sorts: [], viewState: { scrollTop: 0, scrollLeft: 0, sidebarWidth: 260, editorHeight: 180 } },
+  ] }, unavailableTabIds: [], warning: null })
+  vi.mocked(desktop.openFiles).mockResolvedValue([{ ok: true, metadata: { fileId: 'a', path: '/a.parquet', name: 'a.parquet', sizeBytes: '1', rowCount: '1', rowGroupCount: 1, columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] } }])
+  vi.mocked(desktop.startQuery).mockResolvedValue({ queryId: 'sql-a', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })
+  vi.mocked(desktop.fetchQueryBatch).mockResolvedValue({ queryId: 'sql-a', rows: [[1]], done: true, truncated: false, returnedRows: '1', elapsedMs: '2' })
+
+  render(<App api={desktop} />)
+  await userEvent.click(await screen.findByRole('tab', { name: 'SQL' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Run SQL' }))
+  await screen.findByRole('gridcell', { name: /1/ })
+  await userEvent.click(screen.getByRole('button', { name: /export csv/i }))
+
+  await waitFor(() => expect(desktop.startExport).toHaveBeenCalledTimes(2))
+  expect(desktop.startExport).toHaveBeenLastCalledWith({
+    fileId: 'a', destination: '/tmp/a.csv', overwrite: true,
+    source: { kind: 'sql', sql: 'SELECT id FROM data' },
+  })
+  act(() => exportEvent?.({ exportId: 'export-1', status: 'completed', rowsWritten: '12000', error: null }))
+  expect(await screen.findByRole('status', { name: /export status/i })).toHaveTextContent(/12,000 rows exported/i)
 })
 
 it('provides roving keyboard query-mode tabs with associated tabpanels', async () => {

@@ -52,6 +52,30 @@ export interface QueryBatch {
   elapsedMs: string
 }
 
+export type ExportSource =
+  | { kind: 'sql'; sql: string }
+  | { kind: 'filter'; query: FilterQueryRequest }
+
+export interface ExportRequest {
+  fileId: string
+  destination: string
+  overwrite: boolean
+  source: ExportSource
+}
+
+export interface ExportStarted {
+  exportId: string
+}
+
+export type ExportStatus = 'queued' | 'running' | 'completed' | 'cancelled' | 'error'
+
+export interface ExportProgress {
+  exportId: string
+  status: ExportStatus
+  rowsWritten: string
+  error: AppError | null
+}
+
 export type ValueFilterOperator =
   | 'eq'
   | 'notEq'
@@ -345,6 +369,15 @@ export const isQueryBatch = (value: unknown): value is QueryBatch =>
   typeof value.truncated === 'boolean' &&
   u64WireDecimal(value.returnedRows) &&
   u64WireDecimal(value.elapsedMs)
+
+export const isExportProgress = (value: unknown): value is ExportProgress =>
+  isRecord(value) &&
+  hasExactKeys(value, ['exportId', 'status', 'rowsWritten', 'error']) &&
+  typeof value.exportId === 'string' && value.exportId.length > 0 &&
+  typeof value.status === 'string' &&
+  new Set(['queued', 'running', 'completed', 'cancelled', 'error']).has(value.status) &&
+  u64WireDecimal(value.rowsWritten) &&
+  (value.error === null || isAppError(value.error))
 
 const u64WireDecimal = (value: unknown): value is string => {
   if (!isDecimalString(value) || !/^(?:0|[1-9]\d*)$/.test(value)) return false

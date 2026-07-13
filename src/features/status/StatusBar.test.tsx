@@ -27,3 +27,26 @@ it('labels queued work and offers a stop action', async () => {
   await userEvent.click(screen.getByRole('button', { name: /stop query/i }))
   expect(onCancel).toHaveBeenCalledOnce()
 })
+
+it('starts export for a completed query and exposes export cancellation while running', async () => {
+  const onExport = vi.fn()
+  const onCancelExport = vi.fn()
+  const view = render(<StatusBar status="done" elapsedMs="4" returnedRows="20" visibleRange={[1, 20]} totalRows={20} canExport onExport={onExport} />)
+  await userEvent.click(screen.getByRole('button', { name: /export csv/i }))
+  expect(onExport).toHaveBeenCalledOnce()
+
+  view.rerender(<StatusBar status="done" elapsedMs="4" returnedRows="20" visibleRange={[1, 20]} totalRows={20}
+    exportProgress={{ exportId: 'export-1', status: 'running', rowsWritten: '0', error: null }} onCancelExport={onCancelExport} />)
+  expect(screen.getByRole('status', { name: /export status/i })).toHaveTextContent(/exporting/i)
+  await userEvent.click(screen.getByRole('button', { name: /cancel export/i }))
+  expect(onCancelExport).toHaveBeenCalledOnce()
+})
+
+it('reports completed export rows and sanitized export errors', () => {
+  const view = render(<StatusBar status="done" elapsedMs="4" returnedRows="20" visibleRange={null} totalRows={20}
+    exportProgress={{ exportId: 'export-1', status: 'completed', rowsWritten: '12500', error: null }} />)
+  expect(screen.getByRole('status', { name: /export status/i })).toHaveTextContent(/12,500 rows/i)
+  view.rerender(<StatusBar status="done" elapsedMs="4" returnedRows="20" visibleRange={null} totalRows={20}
+    exportProgress={{ exportId: 'export-1', status: 'error', rowsWritten: '0', error: { code: 'RESOURCE_EXHAUSTED', message: 'Disk full', detail: null } }} />)
+  expect(screen.getByRole('alert')).toHaveTextContent(/disk full/i)
+})

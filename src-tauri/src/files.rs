@@ -347,6 +347,7 @@ pub async fn reload_file(
 #[tauri::command]
 pub async fn close_file(file_id: String, state: State<'_, AppState>) -> Result<(), AppError> {
     state.queries.close_file(&file_id);
+    state.exports.close_file(&file_id);
     state.files.remove(&file_id)
 }
 

@@ -1,4 +1,5 @@
 pub mod error;
+pub mod export;
 pub mod files;
 pub mod filters;
 pub mod models;
@@ -10,6 +11,7 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 pub struct AppState {
+    pub exports: export::ExportService,
     pub files: files::FileRegistry,
     pub queries: query::QueryService,
     pub sessions: session::SessionStore,
@@ -18,6 +20,7 @@ pub struct AppState {
 impl AppState {
     fn with_session_path(path: PathBuf) -> Self {
         Self {
+            exports: export::ExportService::default(),
             files: files::FileRegistry::default(),
             queries: query::QueryService::default(),
             sessions: session::SessionStore::new(path),
@@ -52,6 +55,8 @@ pub fn run() {
             query::start_filter_query,
             query::fetch_query_batch,
             query::cancel_query,
+            export::start_export,
+            export::cancel_export,
             session::load_session,
             session::save_session
         ])
