@@ -12,7 +12,7 @@ const protectSql = (sql: string): { text: string; protectedParts: string[] } => 
         end += 1
       }
     } else if (char === '-' && next === '-') {
-      end = sql.indexOf('\n', index); if (end < 0) end = sql.length
+      end = sql.indexOf('\n', index); end = end < 0 ? sql.length : end + 1
     } else if (char === '/' && next === '*') {
       const close = sql.indexOf('*/', index + 2); end = close < 0 ? sql.length : close + 2
     }

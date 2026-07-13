@@ -15,4 +15,6 @@ it('handles empty and malformed SQL without throwing', () => {
 
 it('preserves the newline that terminates a line comment', () => {
   expect(formatSql('select 1 -- from here\nfrom data')).toBe('SELECT 1 -- from here\nFROM data')
+  expect(formatSql('select 1 -- keep addition outside comment\n+ 2')).toBe('SELECT 1 -- keep addition outside comment\n+ 2')
+  expect(formatSql('select 1 /* from remains a comment */ + 2')).toBe('SELECT 1 /* from remains a comment */ + 2')
 })

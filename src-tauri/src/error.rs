@@ -18,6 +18,7 @@ pub enum AppError {
     #[error("{message}")]
     SqlLocated {
         message: String,
+        summary: String,
         line: u64,
         column: u64,
     },
@@ -61,7 +62,16 @@ impl AppError {
 
     fn detail(&self) -> Option<String> {
         match self {
-            Self::SqlLocated { line, column, .. } => Some(format!("line {line} column {column}")),
+            Self::SqlLocated {
+                summary,
+                line,
+                column,
+                ..
+            } => Some(if summary.is_empty() {
+                format!("line {line} column {column}")
+            } else {
+                format!("{summary}\nline {line} column {column}")
+            }),
             _ => None,
         }
     }
@@ -70,12 +80,126 @@ impl AppError {
         match sql_location_from_message(source) {
             Some((line, column)) => Self::SqlLocated {
                 message: message.into(),
+                summary: sanitize_sql_error_summary(source),
                 line,
                 column,
             },
             None => Self::Sql(message.into()),
         }
     }
+}
+
+const MAX_SQL_SUMMARY_CHARS: usize = 2_000;
+
+fn query_echo_or_caret(line: &str) -> bool {
+    let trimmed = line.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let line_echo = lower
+        .strip_prefix("line ")
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(number, _)| {
+            !number.is_empty() && number.chars().all(|char| char.is_ascii_digit())
+        });
+    line_echo
+        || (!trimmed.is_empty()
+            && trimmed
+                .chars()
+                .all(|char| matches!(char, '^' | '~' | '|' | '-' | ' ')))
+}
+
+fn redact_quoted_values(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let chars = line.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let quote = chars[index];
+        if quote != '\'' && quote != '"' {
+            output.push(quote);
+            index += 1;
+            continue;
+        }
+        output.push_str(if quote == '\'' {
+            "[literal]"
+        } else {
+            "[identifier]"
+        });
+        index += 1;
+        while index < chars.len() {
+            if chars[index] == quote && chars.get(index + 1) == Some(&quote) {
+                index += 2;
+            } else if chars[index] == quote {
+                index += 1;
+                break;
+            } else {
+                index += 1;
+            }
+        }
+    }
+    output
+}
+
+fn redact_absolute_paths(line: &str) -> String {
+    let chars = line.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let boundary = index == 0
+            || chars[index - 1].is_whitespace()
+            || matches!(chars[index - 1], '(' | '[' | '{' | ':' | '=');
+        let unix = boundary && chars[index] == '/';
+        let windows = boundary
+            && chars
+                .get(index)
+                .is_some_and(|char| char.is_ascii_alphabetic())
+            && chars.get(index + 1) == Some(&':')
+            && chars
+                .get(index + 2)
+                .is_some_and(|char| matches!(char, '/' | '\\'));
+        if unix || windows {
+            output.push_str("[path]");
+            index += if windows { 3 } else { 1 };
+            while index < chars.len()
+                && !chars[index].is_whitespace()
+                && !matches!(chars[index], ',' | ';' | ')' | ']' | '}')
+            {
+                index += 1;
+            }
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+    output
+}
+
+fn sanitize_sql_error_summary(source: &str) -> String {
+    let mut safe_lines = Vec::new();
+    for raw in source.lines() {
+        if query_echo_or_caret(raw) || raw.trim().is_empty() {
+            continue;
+        }
+        let mut line = raw
+            .chars()
+            .map(|char| if char.is_control() { ' ' } else { char })
+            .collect::<String>();
+        if line.to_ascii_lowercase().starts_with("sql parser error:") {
+            line.replace_range(.."sql parser error:".len(), "Parser Error:");
+        }
+        let lower = line.to_ascii_lowercase();
+        if let Some(location) = lower.find(" at line") {
+            line.truncate(location);
+        }
+        line = redact_absolute_paths(&redact_quoted_values(&line));
+        let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !collapsed.is_empty() {
+            safe_lines.push(collapsed);
+        }
+    }
+    safe_lines
+        .join("\n")
+        .chars()
+        .take(MAX_SQL_SUMMARY_CHARS)
+        .collect()
 }
 
 impl Serialize for AppError {
@@ -153,7 +277,7 @@ pub(crate) fn sql_location_from_message(message: &str) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppError, sql_location_from_message};
+    use super::{AppError, MAX_SQL_SUMMARY_CHARS, sql_location_from_message};
     use serde_json::json;
 
     #[test]
@@ -234,23 +358,55 @@ mod tests {
     }
 
     #[test]
-    fn located_sql_error_serializes_only_a_safe_location() {
-        let error = AppError::SqlLocated {
-            message: "The query has invalid SQL syntax".into(),
-            line: 12,
-            column: 7,
-        };
+    fn located_sql_error_serializes_a_useful_summary_without_sensitive_source() {
+        let error = AppError::sql_with_source(
+            "The query could not be prepared or executed",
+            "Binder Error: Could not convert string 'super-secret' from /Users/alice/private.parquet\nCandidate bindings: \"safe_col\"\nWindows source C:\\Users\\alice\\secret.parquet and /proc/self/fd/9\nLINE 12: SELECT 'super-secret' FROM read_parquet('/dev/fd/42')\n                         ^\ninternal temp /tmp/parquet-viewer/query-1\u{7}",
+        );
 
         let wire = serde_json::to_value(error).unwrap();
+        assert_eq!(wire["code"], "SQL_ERROR");
         assert_eq!(
-            wire,
-            json!({
-                "code": "SQL_ERROR",
-                "message": "The query has invalid SQL syntax",
-                "detail": "line 12 column 7"
-            })
+            wire["message"],
+            "The query could not be prepared or executed"
         );
-        assert!(!wire.to_string().contains("private.parquet"));
+        let detail = wire["detail"].as_str().unwrap();
+        assert!(detail.contains("Binder Error:"));
+        assert!(detail.contains("Candidate bindings:"));
+        assert!(
+            detail
+                .lines()
+                .last()
+                .is_some_and(|line| line.starts_with("line 12 column "))
+        );
+        for sensitive in [
+            "super-secret",
+            "private.parquet",
+            "/Users/",
+            "C:\\Users",
+            "/proc/self/fd",
+            "SELECT",
+            "/dev/fd",
+            "/tmp/",
+            "^",
+            "\u{7}",
+        ] {
+            assert!(
+                !detail.contains(sensitive),
+                "detail leaked {sensitive}: {detail}"
+            );
+        }
+        assert!(detail.chars().count() <= 2_100);
+
+        let long = AppError::sql_with_source(
+            "The query has invalid SQL syntax",
+            &format!("Parser Error: {} at Line: 1, Column: 1", "x".repeat(4_000)),
+        );
+        let long_detail = serde_json::to_value(long).unwrap()["detail"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(long_detail.chars().count() <= MAX_SQL_SUMMARY_CHARS + 32);
     }
 
     #[test]

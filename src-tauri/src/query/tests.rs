@@ -270,7 +270,9 @@ fn syntax_error_serializes_a_safe_location_without_sql_or_engine_text() {
     let wire = serde_json::to_value(error).unwrap();
     assert_eq!(wire["code"], "SQL_ERROR");
     assert_eq!(wire["message"], "The query has invalid SQL syntax");
-    assert!(wire["detail"].as_str().unwrap().starts_with("line "));
+    let detail = wire["detail"].as_str().unwrap();
+    assert!(detail.contains("Parser Error:"));
+    assert!(detail.lines().last().unwrap().starts_with("line "));
     let serialized = wire.to_string();
     assert!(!serialized.contains("SELECT 1"));
     assert!(!serialized.contains("sql parser"));
@@ -296,11 +298,13 @@ fn duckdb_preparation_error_leaves_no_cursor() {
         wire["message"],
         "The query could not be prepared or executed"
     );
-    assert!(
-        wire["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.starts_with("line "))
-    );
+    assert!(wire["detail"].as_str().is_some_and(|detail| {
+        detail.contains("Binder Error:")
+            && detail
+                .lines()
+                .last()
+                .is_some_and(|line| line.starts_with("line "))
+    }));
     assert!(!wire.to_string().contains("missing_column"));
     assert_eq!(service.active_cursor_count(), 0);
 }

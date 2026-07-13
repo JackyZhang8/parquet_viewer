@@ -29,7 +29,7 @@ export interface SqlErrorMarker {
 }
 
 export const parseSqlErrorMarker = (error: AppError): SqlErrorMarker => {
-  const match = error.detail?.match(/^line ([1-9]\d*) column ([1-9]\d*)$/)
+  const match = error.detail?.match(/(?:^|\n)line ([1-9]\d*) column ([1-9]\d*)$/)
   const lineNumber = Math.max(1, Number(match?.[1] ?? 1) || 1)
   const column = Math.max(1, Number(match?.[2] ?? 1) || 1)
   const message = error.message.replace(/[\r\n\t\0-\x1f\x7f]+/g, ' ').trim().slice(0, 1000) || 'SQL query failed'
@@ -91,6 +91,7 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
   const onRunRef = useRef(onRun); onRunRef.current = onRun
   const [mounted, setMounted] = useState(0)
   const [previewLimit, setPreviewLimit] = useState(10_000)
+  const [copyFeedback, setCopyFeedback] = useState<'success' | 'error' | null>(null)
   const dark = typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches
 
   const clearMarkers = () => {
@@ -170,6 +171,16 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
       endLineNumber: marker.lineNumber, endColumn: marker.column + 1,
     }])
   }, [error, mounted, tabId])
+  useEffect(() => setCopyFeedback(null), [error?.detail, tabId])
+
+  const copyDetails = async () => {
+    if (!error?.detail) return
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(error.detail)
+      setCopyFeedback('success')
+    } catch { setCopyFeedback('error') }
+  }
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
@@ -208,6 +219,13 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
         onChange={(next) => { clearMarkers(); onChange(next ?? '') }}
         onMount={onMount} options={{ ariaLabel: 'SQL editor', minimap: { enabled: false }, wordWrap: 'on', automaticLayout: true, scrollBeyondLastLine: false }} />
     </div>
+    {error?.detail && <details className="sql-error-details">
+      <summary>Error details</summary>
+      <pre aria-label="SQL error details" tabIndex={0}>{error.detail}</pre>
+      <button type="button" onClick={() => void copyDetails()}>Copy details</button>
+      {copyFeedback === 'success' && <span role="status">Copied details</span>}
+      {copyFeedback === 'error' && <span role="alert">Could not copy details</span>}
+    </details>}
     <div className="sql-resize-handle" role="separator" aria-label="Resize SQL editor" aria-orientation="horizontal"
       aria-valuemin={MIN_HEIGHT} aria-valuemax={MAX_HEIGHT} aria-valuenow={clampHeight(height)} tabIndex={0}
       onPointerDown={startResize} onKeyDown={resizeKey} />

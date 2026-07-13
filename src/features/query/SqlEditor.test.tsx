@@ -102,7 +102,7 @@ it('updates the controlled draft and runs/formats by toolbar and shortcut', asyn
 })
 
 it('parses safe locations, falls back, sets error markers, and clears them on edit', () => {
-  expect(parseSqlErrorMarker({ code: 'SQL_ERROR', message: 'The query has invalid SQL syntax', detail: 'line 3 column 9' })).toMatchObject({ lineNumber: 3, column: 9 })
+  expect(parseSqlErrorMarker({ code: 'SQL_ERROR', message: 'The query has invalid SQL syntax', detail: 'Parser Error: Expected expression\nline 3 column 9' })).toMatchObject({ lineNumber: 3, column: 9 })
   expect(parseSqlErrorMarker({ code: 'SQL_ERROR', message: 'bad', detail: null })).toMatchObject({ lineNumber: 1, column: 1 })
   const error: AppError = { code: 'SQL_ERROR', message: 'The query has invalid SQL syntax', detail: 'line 3 column 9' }
   const view = render(<SqlEditor {...base} error={error} />)
@@ -111,6 +111,21 @@ it('parses safe locations, falls back, sets error markers, and clears them on ed
   expect(mocks.setMarkers).toHaveBeenLastCalledWith(expect.anything(), 'parquet-viewer-sql', [])
   view.rerender(<SqlEditor {...base} error={undefined} />)
   expect(mocks.setMarkers).toHaveBeenLastCalledWith(expect.anything(), 'parquet-viewer-sql', [])
+})
+
+it('shows accessible SQL details and reports copy success and failure', async () => {
+  const detail = 'Binder Error: Referenced column [identifier] not found\nline 2 column 8'
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  render(<SqlEditor {...base} error={{ code: 'SQL_ERROR', message: 'The query could not be prepared or executed', detail }} />)
+  expect(screen.getByText('Error details')).toBeInTheDocument()
+  expect(screen.getByLabelText('SQL error details')).toHaveTextContent('Binder Error')
+  await userEvent.click(screen.getByRole('button', { name: 'Copy details' }))
+  expect(writeText).toHaveBeenCalledWith(detail)
+  expect(screen.getByRole('status')).toHaveTextContent('Copied details')
+  writeText.mockRejectedValueOnce(new Error('denied'))
+  await userEvent.click(screen.getByRole('button', { name: 'Copy details' }))
+  expect(screen.getByRole('alert')).toHaveTextContent('Could not copy details')
 })
 
 it('supports keyboard editor resizing within the allowed range', () => {
