@@ -182,11 +182,12 @@ pub struct QueryStarted {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QueryBatch {
     pub query_id: String,
     pub rows: Vec<Vec<CellValue>>,
     pub done: bool,
+    pub truncated: bool,
     #[serde(with = "u64_decimal")]
     pub returned_rows: u64,
     #[serde(with = "u64_decimal")]
@@ -260,6 +261,7 @@ mod tests {
                 CellValue::String("Ada".into()),
             ]],
             done: false,
+            truncated: true,
             returned_rows: 1,
             elapsed_ms: 12,
         };
@@ -286,10 +288,23 @@ mod tests {
                 "queryId": "query-1",
                 "rows": [[7, null, "Ada"]],
                 "done": false,
+                "truncated": true,
                 "returnedRows": "1",
                 "elapsedMs": "12"
             })
         );
+
+        let exact = json!({
+            "queryId": "query-1", "rows": [], "done": true, "truncated": false,
+            "returnedRows": "0", "elapsedMs": "1"
+        });
+        assert!(serde_json::from_value::<QueryBatch>(exact.clone()).is_ok());
+        let mut missing = exact.clone();
+        missing.as_object_mut().unwrap().remove("truncated");
+        assert!(serde_json::from_value::<QueryBatch>(missing).is_err());
+        let mut extra = exact;
+        extra["debug"] = json!("secret");
+        assert!(serde_json::from_value::<QueryBatch>(extra).is_err());
     }
 
     #[test]

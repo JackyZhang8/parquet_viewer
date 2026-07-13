@@ -208,6 +208,9 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
             if job.cancelled.load(Ordering::Acquire) {
                 return Err(AppError::Cancelled("The query was cancelled".into()));
             }
+            if returned_rows >= job.preview_limit as u64 {
+                return send_batch(job, &mut batch, true, true, returned_rows, started);
+            }
             let mut converted = Vec::with_capacity(record_batch.num_columns());
             for column in record_batch.columns() {
                 let cell = cell_from_array(column.as_ref(), row)?;
@@ -219,7 +222,7 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
                 .checked_add(row_bytes + separator_bytes)
                 .ok_or_else(batch_resource_exhausted)?;
             if !batch.is_empty() && candidate_bytes > max_rows_bytes {
-                send_batch(job, &mut batch, false, returned_rows, started)?;
+                send_batch(job, &mut batch, false, false, returned_rows, started)?;
                 batch_rows_bytes = 2;
             }
             batch_rows_bytes = batch_rows_bytes
@@ -229,12 +232,12 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
             batch.push(converted);
             returned_rows += 1;
             if batch.len() == job.batch_size {
-                send_batch(job, &mut batch, false, returned_rows, started)?;
+                send_batch(job, &mut batch, false, false, returned_rows, started)?;
                 batch_rows_bytes = 2;
             }
         }
     }
-    send_batch(job, &mut batch, true, returned_rows, started)
+    send_batch(job, &mut batch, true, false, returned_rows, started)
 }
 
 fn bound_to_duck_value(value: &BoundValue) -> Value {
@@ -251,6 +254,7 @@ fn send_batch(
     job: &QueryJob,
     rows: &mut Vec<Vec<CellValue>>,
     done: bool,
+    truncated: bool,
     returned_rows: u64,
     started: Instant,
 ) -> Result<(), AppError> {
@@ -258,6 +262,7 @@ fn send_batch(
         query_id: job.query_id.clone(),
         rows: std::mem::take(rows),
         done,
+        truncated,
         returned_rows,
         elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
     };
@@ -272,6 +277,7 @@ fn batch_payload_overhead(query_id: &str) -> Result<usize, AppError> {
         query_id: query_id.into(),
         rows: Vec::new(),
         done: false,
+        truncated: false,
         returned_rows: u64::MAX,
         elapsed_ms: u64::MAX,
     };

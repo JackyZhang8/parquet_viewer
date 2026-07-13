@@ -243,17 +243,24 @@ export const createWorkspaceStore = (
       if (!tab || tab.status !== 'ready' || get().activeTabId !== tabId) return
       const previous = get().queriesByTab[tabId] ?? idleQueryState()
       const generation = previous.generation + 1
+      if (!Number.isSafeInteger(request.previewLimit) || request.previewLimit < 1 || request.previewLimit > 10_000) {
+        if (previous.queryId) void api.cancelQuery(previous.queryId).catch(() => undefined)
+        set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
+          ...idleQueryState(generation), status: 'error', error: {
+            code: 'INVALID_ARGUMENT', message: 'Preview limit must be between 1 and 10000', detail: null,
+          },
+        } } }))
+        return
+      }
       if (previous.queryId) void api.cancelQuery(previous.queryId).catch(() => undefined)
       const stale = previous.rows.length > 0
       set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
         ...previous, status: 'queued', error: undefined, loadingBatch: false, done: false,
         stale, generation, queryId: undefined,
       } } }))
-      const previewLimit = Number.isSafeInteger(request.previewLimit) && request.previewLimit > 0
-        ? Math.min(request.previewLimit, 10_000) : 10_000
-      const normalized = { ...request, previewLimit }
+      const previewLimit = request.previewLimit
       try {
-        const started = await api.startFilterQuery({ fileId: tab.fileId, query: normalized, batchSize: 500 })
+        const started = await api.startFilterQuery({ fileId: tab.fileId, query: request, batchSize: 500 })
         const current = get().queriesByTab[tabId]
         if (!current || current.generation !== generation) {
           try { await api.cancelQuery(started.queryId) } catch { /* best effort */ }
@@ -286,15 +293,15 @@ export const createWorkspaceStore = (
         if (batch.queryId !== queryId || batch.rows.some((row) => row.length !== current.columns.length)) throw internalQueryError()
         const limit = queryLimits.get(tabId) ?? 10_000
         const available = Math.max(0, limit - current.rows.length)
+        if (batch.rows.length > available || (batch.truncated && !batch.done)) throw internalQueryError()
         const appended = batch.rows.slice(0, available)
         const rows = [...current.rows, ...appended]
-        const truncated = batch.rows.length > available || (rows.length >= limit && !batch.done)
-        const done = batch.done || truncated
+        const truncated = batch.truncated
+        const done = batch.done
         set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
           ...current, rows, done, status: done ? 'done' : 'running', returnedRows: batch.returnedRows,
           elapsedMs: batch.elapsedMs, loadingBatch: false, truncated, stale: false,
         } } }))
-        if (truncated) { try { await api.cancelQuery(queryId) } catch { /* best effort */ } }
       } catch (error) {
         const current = get().queriesByTab[tabId]
         if (!current || current.generation !== generation || current.queryId !== queryId) return

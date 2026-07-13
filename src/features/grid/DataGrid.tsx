@@ -53,7 +53,7 @@ export function DataGrid(props: Props) {
   const [anchor, setAnchor] = useState<Point | null>(null)
   const [focus, setFocus] = useState<Point | null>(null)
   const [detail, setDetail] = useState<Detail | null>(null)
-  const [copyMessage, setCopyMessage] = useState('')
+  const [copyFeedback, setCopyFeedback] = useState<{ message: string; ok: boolean } | null>(null)
   const setScrollRef = useCallback((node: HTMLDivElement | null) => { scrollRef.current = node; setScrollElement(node) }, [])
   const visible = useMemo(() => columns.map((column, index) => ({ column, index })).filter(({ index }) => !hidden.has(index)), [columns, hidden])
   const visiblePosition = useCallback((column: number) => visible.findIndex(({ index }) => index === column), [visible])
@@ -72,15 +72,20 @@ export function DataGrid(props: Props) {
   })
   const virtualRows = rowVirtualizer.getVirtualItems()
   const virtualColumns = columnVirtualizer.getVirtualItems()
-  const firstRow = virtualRows[0]?.index
   const lastRow = virtualRows.at(-1)?.index
 
   useEffect(() => {
-    const range: [number, number] | null = firstRow === undefined || lastRow === undefined ? null : [firstRow + 1, lastRow + 1]
-    onVisibleRangeChange?.(range)
-  }, [firstRow, lastRow, onVisibleRangeChange])
+    visible.forEach(({ index }, visibleIndex) => columnVirtualizer.resizeItem(visibleIndex, widths[index]))
+  }, [columnVirtualizer, visible, widths])
+  const reportVisibleRange = useCallback((scrollTop: number, height: number) => {
+    if (!rows.length) { onVisibleRangeChange?.(null); return }
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT))
+    const end = Math.min(rows.length, Math.ceil((scrollTop + (height || 360)) / ROW_HEIGHT))
+    onVisibleRangeChange?.([start + 1, Math.max(start + 1, end)])
+  }, [onVisibleRangeChange, rows.length])
+  useEffect(() => { reportVisibleRange(scrollElement?.scrollTop ?? 0, scrollElement?.clientHeight ?? 360) }, [reportVisibleRange, scrollElement])
   useEffect(() => {
-    lastLoadSize.current = null; setAnchor(null); setFocus(null); setDetail(null); setCopyMessage('')
+    lastLoadSize.current = null; setAnchor(null); setFocus(null); setDetail(null); setCopyFeedback(null)
     setHidden(new Set()); setWidths(columns.map(defaultWidth)); setMenuOpen(false)
   }, [queryKey])
   useEffect(() => {
@@ -147,8 +152,8 @@ export function DataGrid(props: Props) {
       region = rows.slice(rowStart, rowEnd + 1).map((row) => selectedColumns.map(({ index }) => row[index] ?? null))
     }
     const text = region.map((row) => row.map(formatTsvValue).join('\t')).join('\n')
-    try { await navigator.clipboard.writeText(text); setCopyMessage('Copied to clipboard'); onCopyStatus?.('Copied to clipboard', true) }
-    catch { setCopyMessage('Could not copy to clipboard'); onCopyStatus?.('Could not copy to clipboard', false) }
+    try { await navigator.clipboard.writeText(text); setCopyFeedback({ message: 'Copied to clipboard', ok: true }); onCopyStatus?.('Copied to clipboard', true) }
+    catch { setCopyFeedback({ message: 'Could not copy to clipboard', ok: false }); onCopyStatus?.('Could not copy to clipboard', false) }
   }
   const resizeKey = (event: React.KeyboardEvent, index: number) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
@@ -163,9 +168,17 @@ export function DataGrid(props: Props) {
   const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
     const target = event.currentTarget
     props.onScrollChange?.({ top: target.scrollTop, left: target.scrollLeft })
+    reportVisibleRange(target.scrollTop, target.clientHeight)
     if (status === 'running' && !done && !loading && target.scrollTop + target.clientHeight >= target.scrollHeight - ROW_HEIGHT * 4 && lastLoadSize.current !== rows.length) {
       lastLoadSize.current = rows.length; onLoadMore?.()
     }
+  }
+  const enterGrid = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || !rows.length || !visible.length || !['Enter', ' ', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return
+    event.preventDefault()
+    const point = { row: 0, column: visible[0].index }
+    setAnchor(point); setFocus(point); rowVirtualizer.scrollToIndex(0); columnVirtualizer.scrollToIndex(0)
+    requestAnimationFrame(() => scrollRef.current?.querySelector<HTMLElement>(`[data-cell="0:${point.column}"]`)?.focus())
   }
   const totalWidth = ROW_NUMBER_WIDTH + columnVirtualizer.getTotalSize()
 
@@ -179,24 +192,27 @@ export function DataGrid(props: Props) {
         <input type="checkbox" aria-label={column.name} checked={!hidden.has(index)} onChange={() => setHidden((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next })} /> {column.name}
       </label>)}</fieldset>}
     </div>
-    <div className="sr-status" role="status" aria-live="polite">{copyMessage}</div>
-    <div ref={setScrollRef} className="data-grid" role="grid" tabIndex={0} aria-rowcount={rows.length + 1} aria-colcount={visible.length + 1} onScroll={handleScroll}>
-      <div className="grid-header" role="row" style={{ width: totalWidth }}>
-        <div className="row-number header-number" role="columnheader">#</div>
-        {virtualColumns.map((virtual) => { const item = visible[virtual.index]; const width = widths[item.index]; return <div key={item.index} role="columnheader" className="grid-header-cell" style={{ left: ROW_NUMBER_WIDTH + virtual.start, width }}>
+    <div className="sr-status" role="status" aria-live="polite">{copyFeedback?.message ?? ''}</div>
+    {copyFeedback && <div className={`copy-toast copy-toast-${copyFeedback.ok ? 'success' : 'error'}`}>{copyFeedback.message}</div>}
+    <div ref={setScrollRef} className="data-grid" role="grid" tabIndex={0} aria-rowcount={rows.length + 1} aria-colcount={visible.length + 1} onScroll={handleScroll} onKeyDown={enterGrid}>
+      <div className="grid-header" role="row" aria-rowindex={1} style={{ width: totalWidth }}>
+        <div className="row-number header-number" role="columnheader" aria-colindex={1}>#</div>
+        {virtualColumns.map((virtual) => { const item = visible[virtual.index]; const width = widths[item.index]; return <div key={item.index} role="columnheader" aria-colindex={virtual.index + 2} className="grid-header-cell" style={{ left: ROW_NUMBER_WIDTH + virtual.start, width }}>
           <span>{item.column.name}</span><small>{item.column.logicalType}</small>
           <span role="separator" tabIndex={0} aria-label={`Resize ${item.column.name}`} aria-orientation="vertical" aria-valuemin={MIN_WIDTH} aria-valuemax={MAX_WIDTH} aria-valuenow={width} onKeyDown={(event) => resizeKey(event, item.index)} onPointerDown={(event) => startResize(event, item.index)} />
         </div> })}
       </div>
       <div className="grid-body" style={{ height: rowVirtualizer.getTotalSize(), width: totalWidth }}>
-        {virtualRows.map((virtualRow) => <div className="grid-row" role="row" key={virtualRow.key} style={{ transform: `translateY(${virtualRow.start}px)`, width: totalWidth }}>
-          <div className="row-number" role="rowheader">{virtualRow.index + 1}</div>
+        {virtualRows.map((virtualRow) => <div className="grid-row" role="row" aria-rowindex={virtualRow.index + 2} key={virtualRow.key} style={{ transform: `translateY(${virtualRow.start}px)`, width: totalWidth }}>
+          <div className="row-number" role="rowheader" aria-colindex={1}>{virtualRow.index + 1}</div>
           {virtualColumns.map((virtualColumn) => { const item = visible[virtualColumn.index]; const value = rows[virtualRow.index]?.[item.index] ?? null; const formatted = formatCellValue(value, 80); const point = { row: virtualRow.index, column: item.index }; return <div
-            key={item.index} role="gridcell" data-cell={`${point.row}:${point.column}`} tabIndex={focus?.row === point.row && focus.column === point.column ? 0 : -1}
+            key={item.index} role="gridcell" aria-rowindex={virtualRow.index + 2} aria-colindex={virtualColumn.index + 2} data-cell={`${point.row}:${point.column}`} tabIndex={focus?.row === point.row && focus.column === point.column ? 0 : -1}
             aria-selected={selected(point)} aria-label={`${item.column.name}, row ${point.row + 1}: ${formatted.full}`}
             className={`grid-cell cell-${formatted.kind}${selected(point) ? ' selected' : ''}`}
             style={{ left: ROW_NUMBER_WIDTH + virtualColumn.start, width: widths[item.index] }}
-            onClick={(event) => { select(point, event.shiftKey, event.currentTarget); openDetail(value, event.currentTarget) }} onKeyDown={(event) => navigate(event, point)}
+            onClick={(event) => { select(point, event.shiftKey, event.currentTarget); openDetail(value, event.currentTarget) }} onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === 'F2') { event.preventDefault(); openDetail(value, event.currentTarget) } else navigate(event, point)
+            }}
           >{formatted.display}</div> })}
         </div>)}
       </div>

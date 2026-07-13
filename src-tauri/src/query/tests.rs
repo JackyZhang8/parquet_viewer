@@ -163,6 +163,28 @@ fn empty_query_returns_one_final_empty_batch() {
 }
 
 #[test]
+fn preview_limit_reports_exact_truncation_at_row_boundaries() {
+    for (source_rows, expected_truncated) in [(4, false), (5, false), (6, true)] {
+        let (_directory, registry, file_id) = registered_fixture(source_rows);
+        let service = QueryService::default();
+        let started = service
+            .start_query(request(file_id, "SELECT * FROM data", 2, 5), &registry)
+            .unwrap();
+        let mut rows = 0;
+        let final_batch = loop {
+            let batch = service.fetch_query_batch(&started.query_id).unwrap();
+            rows += batch.rows.len();
+            if batch.done {
+                break batch;
+            }
+        };
+        assert_eq!(rows, source_rows.min(5) as usize);
+        assert_eq!(final_batch.returned_rows, u64::from(source_rows.min(5)));
+        assert_eq!(final_batch.truncated, expected_truncated);
+    }
+}
+
+#[test]
 fn validates_batch_and_preview_bounds_before_starting() {
     let registry = FileRegistry::default();
     let service = QueryService::default();

@@ -60,6 +60,7 @@ describe('IPC runtime guards', () => {
         queryId: 'query-1',
         rows: [[9_007_199_254_740_991, '9223372036854775807', 3.5, null]],
         done: true,
+        truncated: false,
         returnedRows: '4',
         elapsedMs: '12',
       }),
@@ -69,10 +70,23 @@ describe('IPC runtime guards', () => {
         queryId: 'query-1',
         rows: [],
         done: true,
+        truncated: false,
         returnedRows: 3,
         elapsedMs: 12,
       }),
     ).toBe(false)
+  })
+
+  it('bounds query batch rows, width, nesting, strings, and total cell work', () => {
+    const batch = (rows: unknown[][]) => ({ queryId: 'q', rows, done: true, truncated: false, returnedRows: '0', elapsedMs: '0' })
+    expect(isQueryBatch(batch(Array.from({ length: 5001 }, () => [])))).toBe(false)
+    expect(isQueryBatch(batch([Array.from({ length: 513 }, () => null)]))).toBe(false)
+    let nested: unknown = null
+    for (let depth = 0; depth < 17; depth += 1) nested = [nested]
+    expect(isQueryBatch(batch([[nested]]))).toBe(false)
+    expect(isQueryBatch(batch([['x'.repeat(1024 * 1024 + 1)]]))).toBe(false)
+    const wide = Array.from({ length: 512 }, () => null)
+    expect(isQueryBatch(batch(Array.from({ length: 5000 }, () => wide)))).toBe(false)
   })
 
   it('constructs tagged session numbers without losing integer precision', () => {

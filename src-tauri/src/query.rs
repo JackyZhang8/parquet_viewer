@@ -53,6 +53,7 @@ pub(super) struct QueryJob {
     schema_sql: String,
     schema_params: Vec<BoundValue>,
     batch_size: usize,
+    preview_limit: usize,
     batches: Sender<BatchResult>,
     ready: Sender<ReadyResult>,
     cancelled: Arc<AtomicBool>,
@@ -134,10 +135,11 @@ impl QueryService {
             source,
             execution_sql,
             vec![BoundValue::UnsignedInteger(u64::from(
-                request.preview_limit,
+                request.preview_limit + 1,
             ))],
             schema_sql,
             Vec::new(),
+            request.preview_limit,
             false,
         )
     }
@@ -174,6 +176,7 @@ impl QueryService {
             compiled.params.clone(),
             schema_sql,
             compiled.params,
+            request.query.preview_limit,
             false,
         )
     }
@@ -189,6 +192,7 @@ impl QueryService {
         execution_params: Vec<BoundValue>,
         schema_sql: String,
         schema_params: Vec<BoundValue>,
+        preview_limit: u32,
         panic_for_test: bool,
     ) -> Result<QueryStarted, AppError> {
         let query_id = Uuid::new_v4().to_string();
@@ -253,6 +257,7 @@ impl QueryService {
             schema_sql,
             schema_params,
             batch_size: batch_size as usize,
+            preview_limit: preview_limit as usize,
             batches: batch_sender,
             ready: ready_sender,
             cancelled: cancelled.clone(),
@@ -403,6 +408,7 @@ impl QueryService {
             Vec::new(),
             "SELECT * FROM data LIMIT 0".into(),
             Vec::new(),
+            1,
             true,
         )
     }

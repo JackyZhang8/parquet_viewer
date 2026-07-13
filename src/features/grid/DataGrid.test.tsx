@@ -49,7 +49,7 @@ it('supports keyboard navigation, resizing, hiding, and full-value detail', asyn
   render(<DataGrid queryKey="detail-1" columns={columns(3)} rows={[[long, { z: 2, a: 1 }, 'last']]} status="done" done />)
   const longCell = screen.getAllByRole('gridcell').find((cell) => cell.textContent?.includes('😀'))!
   await userEvent.click(longCell)
-  expect(screen.getByRole('dialog')).toHaveTextContent(long)
+  expect(screen.getByRole('dialog')).toHaveTextContent(long.trim())
   await userEvent.keyboard('{Escape}')
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(longCell).toHaveFocus()
@@ -105,4 +105,82 @@ it('moves focus safely when the focused column becomes hidden', async () => {
   await userEvent.click(screen.getByRole('button', { name: 'Columns' }))
   await userEvent.click(screen.getByRole('checkbox', { name: 'column_1' }))
   await waitFor(() => expect(screen.getByRole('gridcell', { name: /column_2.*right/i })).toHaveAttribute('aria-selected', 'true'))
+})
+
+it('recomputes virtual column geometry after keyboard resize', async () => {
+  const view = render(<DataGrid queryKey="geometry-key" columns={columns(3)} rows={[[1, 2, 3]]} status="done" done />)
+  const body = view.container.querySelector<HTMLElement>('.grid-body')!
+  expect(body.style.width).toBe('492px')
+  const handle = screen.getByRole('separator', { name: /resize column_0/i })
+  fireEvent.keyDown(handle, { key: 'ArrowRight' })
+  await waitFor(() => {
+    expect(view.container.querySelector<HTMLElement>('.grid-body')!.style.width).toBe('504px')
+    expect(screen.getByRole('columnheader', { name: /column_1/i })).toHaveStyle({ left: '196px' })
+  })
+})
+
+it('recomputes geometry after pointer resize and hide/unhide', async () => {
+  const view = render(<DataGrid queryKey="geometry-pointer" columns={columns(3)} rows={[[1, 2, 3]]} status="done" done />)
+  const handle = screen.getByRole('separator', { name: /resize column_0/i })
+  fireEvent.pointerDown(handle, { clientX: 100 }); fireEvent.pointerMove(document, { clientX: 130 }); fireEvent.pointerUp(document)
+  await waitFor(() => {
+    expect(view.container.querySelector<HTMLElement>('.grid-body')!.style.width).toBe('522px')
+    expect(screen.getByRole('columnheader', { name: /column_1/i })).toHaveStyle({ left: '214px' })
+  })
+  await userEvent.click(screen.getByRole('button', { name: 'Columns' })); await userEvent.click(screen.getByRole('checkbox', { name: 'column_0' }))
+  expect(screen.getByRole('columnheader', { name: /column_1/i })).toHaveStyle({ left: '56px' })
+  await userEvent.click(screen.getByRole('checkbox', { name: 'column_0' }))
+  await waitFor(() => expect(screen.getByRole('columnheader', { name: /column_1/i })).toHaveStyle({ left: '214px' }))
+})
+
+it('enters the grid and opens detail using only the keyboard', async () => {
+  const long = 'long '.repeat(30)
+  render(<DataGrid queryKey="keyboard-entry" columns={columns(2)} rows={[[long, { nested: true }]]} status="done" done />)
+  const grid = screen.getByRole('grid'); grid.focus(); await userEvent.keyboard('{ArrowRight}')
+  const first = screen.getByRole('gridcell', { name: /column_0/i })
+  await waitFor(() => expect(first).toHaveFocus())
+  await userEvent.keyboard('{ArrowRight}')
+  const nested = screen.getByRole('gridcell', { name: /column_1/i })
+  await waitFor(() => expect(nested).toHaveFocus())
+  await userEvent.keyboard('{F2}')
+  expect(screen.getByRole('dialog')).toHaveTextContent('{"nested":true}')
+  await userEvent.keyboard('{Escape}')
+  expect(nested).toHaveFocus()
+  grid.focus(); await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(first).toHaveFocus())
+  await userEvent.keyboard('{Enter}')
+  expect(screen.getByRole('dialog')).toHaveTextContent(long.trim())
+})
+
+it('indexes virtualized headers and cells by visible ARIA order', async () => {
+  render(<DataGrid queryKey="aria" columns={columns(3)} rows={[[1, 2, 3]]} status="done" done />)
+  expect(screen.getAllByRole('row')[0]).toHaveAttribute('aria-rowindex', '1')
+  expect(screen.getByRole('columnheader', { name: '#' })).toHaveAttribute('aria-colindex', '1')
+  expect(screen.getByRole('columnheader', { name: /column_0/i })).toHaveAttribute('aria-colindex', '2')
+  expect(screen.getAllByRole('row')[1]).toHaveAttribute('aria-rowindex', '2')
+  expect(screen.getByRole('rowheader')).toHaveAttribute('aria-colindex', '1')
+  expect(screen.getByRole('gridcell', { name: /column_0/i })).toHaveAttribute('aria-colindex', '2')
+  await userEvent.click(screen.getByRole('button', { name: 'Columns' })); await userEvent.click(screen.getByRole('checkbox', { name: 'column_1' }))
+  expect(screen.getByRole('columnheader', { name: /column_2/i })).toHaveAttribute('aria-colindex', '3')
+  expect(screen.getByRole('gridcell', { name: /column_2/i })).toHaveAttribute('aria-colindex', '3')
+})
+
+it('reports the viewport range without virtualizer overscan', async () => {
+  const onVisibleRangeChange = vi.fn()
+  render(<DataGrid queryKey="range" columns={columns(1)} rows={Array.from({ length: 100 }, (_, index) => [index])} status="done" done onVisibleRangeChange={onVisibleRangeChange} />)
+  await waitFor(() => expect(onVisibleRangeChange).toHaveBeenLastCalledWith([1, 12]))
+  const grid = screen.getByRole('grid')
+  Object.defineProperty(grid, 'clientHeight', { configurable: true, value: 90 })
+  fireEvent.scroll(grid, { target: { scrollTop: 300 } })
+  await waitFor(() => expect(onVisibleRangeChange).toHaveBeenLastCalledWith([11, 13]))
+})
+
+it('shows visible copy success and error feedback', async () => {
+  const writeText = vi.fn(async () => undefined)
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  const view = render(<DataGrid queryKey="toast" columns={columns(1)} rows={[[1]]} status="done" done />)
+  await userEvent.click(screen.getByRole('gridcell')); await userEvent.click(screen.getByRole('button', { name: 'Copy cell' }))
+  expect(view.container.querySelector('.copy-toast-success')).toHaveTextContent('Copied to clipboard')
+  writeText.mockRejectedValueOnce(new Error('denied')); await userEvent.click(screen.getByRole('button', { name: 'Copy cell' }))
+  expect(view.container.querySelector('.copy-toast-error')).toHaveTextContent('Could not copy to clipboard')
 })

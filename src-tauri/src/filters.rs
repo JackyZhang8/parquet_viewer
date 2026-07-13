@@ -71,7 +71,7 @@ pub fn compile_filter_query(
     }
     sql.push_str(" LIMIT ?");
     params.push(BoundValue::UnsignedInteger(u64::from(
-        request.preview_limit,
+        request.preview_limit + 1,
     )));
     Ok(CompiledQuery { sql, params })
 }

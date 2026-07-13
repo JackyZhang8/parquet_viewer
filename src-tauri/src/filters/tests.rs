@@ -39,7 +39,7 @@ fn compiles_empty_request_and_binds_path_then_limit() {
         compiled.params,
         vec![
             BoundValue::String("/private/data.parquet".into()),
-            BoundValue::UnsignedInteger(100),
+            BoundValue::UnsignedInteger(101),
         ]
     );
 }
@@ -78,7 +78,7 @@ fn compiles_typed_predicates_and_preserves_parameter_order() {
             BoundValue::String("paid".into()),
             BoundValue::SignedInteger(i64::MIN),
             BoundValue::Bool(true),
-            BoundValue::UnsignedInteger(100),
+            BoundValue::UnsignedInteger(101),
         ]
     );
 }

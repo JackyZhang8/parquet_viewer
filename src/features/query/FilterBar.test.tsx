@@ -92,3 +92,11 @@ it('edits unique max-three sorts and reorders priority', async () => {
   expect(onSortsChange).toHaveBeenLastCalledWith([{column:'id',direction:'asc'},{column:'amount',direction:'asc'},{column:'active',direction:'asc'}])
   expect(screen.getByLabelText('Sort column').querySelector('option[value="id"]')).toBeDisabled()
 })
+
+it('caps the preview control and reports values above 10000', async () => {
+  render(<FilterBar columns={columns} filters={[]} sorts={[]} onFiltersChange={vi.fn()} onSortsChange={vi.fn()} onRun={vi.fn()} />)
+  expect(screen.getByLabelText('Preview rows')).toHaveAttribute('max', '10000')
+  await userEvent.clear(screen.getByLabelText('Preview rows')); await userEvent.type(screen.getByLabelText('Preview rows'), '10001')
+  await userEvent.click(screen.getByRole('button', { name: 'Run filters' }))
+  expect(screen.getByRole('alert')).toHaveTextContent(/between 1 and 10000/i)
+})

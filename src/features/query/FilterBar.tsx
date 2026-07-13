@@ -133,7 +133,7 @@ export function FilterBar(props: Props) {
     </li>)}</ol>
     <div className="filter-actions">
       <button aria-label="Clear filters" onClick={clearFilters}>Clear filters</button>
-      <label>Preview rows<input aria-label="Preview rows" type="number" min="1" max="100000" value={previewLimit} onChange={(event) => { setPreviewLimit(Number(event.target.value)); setError('') }} /></label>
+      <label>Preview rows<input aria-label="Preview rows" type="number" min="1" max="10000" value={previewLimit} onChange={(event) => { setPreviewLimit(Number(event.target.value)); setError('') }} /></label>
       <button className="primary-button" aria-label="Run filters" onClick={run}>Run</button>
     </div>
   </section>

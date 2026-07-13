@@ -100,7 +100,7 @@ const validateScalar = (column: ColumnSchema, scalar: SessionScalar) => {
 }
 
 export const buildFilterQueryRequest = (columns: ColumnSchema[], filters: SessionFilter[], sorts: SessionSort[], previewLimit: number): FilterQueryRequest => {
-  if (!Number.isInteger(previewLimit) || previewLimit < 1 || previewLimit > 100000) throw new Error('Preview limit must be between 1 and 100000')
+  if (!Number.isInteger(previewLimit) || previewLimit < 1 || previewLimit > 10000) throw new Error('Preview limit must be between 1 and 10000')
   if (filters.length > 100) throw new Error('At most 100 filter conditions are allowed')
   if (sorts.length > 3) throw new Error('At most three sort columns are allowed')
   const byName = new Map(columns.map((column) => [column.name, column]))

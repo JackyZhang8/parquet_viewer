@@ -16,7 +16,7 @@ const api = (): DesktopApi => ({
   openFiles: vi.fn(async (paths: string[]) => paths.map((path) => ({ ok: true as const, metadata: { fileId: path, path, name: path.split('/').pop()!, sizeBytes: '1', rowCount: '1', rowGroupCount: 1, columns: [] } }))),
   closeFile: vi.fn(async () => undefined),
   startFilterQuery: vi.fn(async () => ({ queryId: 'q', columns: [] })),
-  fetchQueryBatch: vi.fn(async () => ({ queryId: 'q', rows: [], done: true, returnedRows: '0', elapsedMs: '0' })),
+  fetchQueryBatch: vi.fn(async () => ({ queryId: 'q', rows: [], done: true, truncated: false, returnedRows: '0', elapsedMs: '0' })),
   cancelQuery: vi.fn(async () => undefined),
   loadSession: vi.fn(async () => ({ snapshot: { version: 1, tabs: [], activeTabId: null }, unavailableTabIds: [], warning: null })),
   saveSession: vi.fn(async () => undefined),
@@ -53,7 +53,7 @@ it('runs filters into isolated per-tab result grids without introducing a SQL ed
   ]},unavailableTabIds:[],warning:null})
   vi.mocked(desktop.openFiles).mockImplementation(async (paths) => paths.map((path)=>({ok:true as const,metadata:{fileId:path.slice(1,2),path,name:path.slice(1),sizeBytes:'1',rowCount:'1',rowGroupCount:1,columns:[{name:'id',logicalType:'INT64',nullable:false}]}})))
   vi.mocked(desktop.startFilterQuery).mockImplementation(async ({ fileId }) => ({ queryId: `q-${fileId}`, columns: [{name:'id',logicalType:'INT64',nullable:false}] }))
-  vi.mocked(desktop.fetchQueryBatch).mockImplementation(async (queryId) => ({ queryId, rows: [[queryId]], done: true, returnedRows: '1', elapsedMs: '2' }))
+  vi.mocked(desktop.fetchQueryBatch).mockImplementation(async (queryId) => ({ queryId, rows: [[queryId]], done: true, truncated: false, returnedRows: '1', elapsedMs: '2' }))
   render(<App api={desktop} />)
   await userEvent.type(await screen.findByLabelText('Filter value'),'1')
   await userEvent.click(screen.getByRole('button',{name:'Add condition'}))

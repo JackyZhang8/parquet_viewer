@@ -47,6 +47,7 @@ export interface QueryBatch {
   queryId: string
   rows: CellValue[][]
   done: boolean
+  truncated: boolean
   returnedRows: string
   elapsedMs: string
 }
@@ -263,13 +264,68 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isDecimalString = (value: unknown): value is string =>
   typeof value === 'string' && /^\d+$/.test(value)
 
-const isCellValue = (value: unknown): value is CellValue => {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return true
-  if (typeof value === 'number') {
-    return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value))
+const MAX_BATCH_ROWS = 5_000
+const MAX_BATCH_COLUMNS = 512
+const MAX_CELL_DEPTH = 16
+const MAX_CELL_STRING_BYTES = 1024 * 1024
+const MAX_BATCH_NODES = 2_000_000
+const MAX_BATCH_VALIDATED_BYTES = 8 * 1024 * 1024
+const utf8 = new TextEncoder()
+type CellChild = { value: unknown; key?: string }
+function* cellChildren(value: unknown[] | Record<string, unknown>): Generator<CellChild> {
+  if (Array.isArray(value)) {
+    for (const item of value) yield { value: item }
+  } else {
+    for (const key in value) if (Object.hasOwn(value, key)) yield { key, value: value[key] }
   }
-  if (Array.isArray(value)) return value.every(isCellValue)
-  return isRecord(value) && Object.values(value).every(isCellValue)
+}
+
+const boundedCellRows = (rows: unknown[]): rows is CellValue[][] => {
+  if (rows.length > MAX_BATCH_ROWS) return false
+  let nodes = 0
+  let bytes = 2 + rows.length
+  const seen = new WeakSet<object>()
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length > MAX_BATCH_COLUMNS) return false
+    bytes += 2 + row.length
+    for (const cell of row) {
+      let current: { value: unknown; depth: number } | undefined = { value: cell, depth: 0 }
+      const stack: { children: Generator<CellChild>; depth: number }[] = []
+      while (current) {
+        const { value, depth } = current
+        nodes += 1
+        if (nodes > MAX_BATCH_NODES) return false
+        if (value === null) bytes += 4
+        else if (typeof value === 'boolean') bytes += 5
+        else if (typeof value === 'number') {
+          if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) return false
+          bytes += 24
+        } else if (typeof value === 'string') {
+          const size = utf8.encode(value).length
+          if (size > MAX_CELL_STRING_BYTES) return false
+          bytes += size + 2
+        } else if (Array.isArray(value) || isRecord(value)) {
+          if (depth >= MAX_CELL_DEPTH || seen.has(value)) return false
+          seen.add(value); bytes += 2 + (Array.isArray(value) ? value.length : 0)
+          stack.push({ children: cellChildren(value), depth: depth + 1 })
+        } else return false
+        if (bytes > MAX_BATCH_VALIDATED_BYTES) return false
+        current = undefined
+        while (stack.length && !current) {
+          const frame = stack[stack.length - 1]
+          const child = frame.children.next()
+          if (child.done) { stack.pop(); continue }
+          if (child.value.key !== undefined) {
+            const keySize = utf8.encode(child.value.key).length
+            if (keySize > MAX_CELL_STRING_BYTES) return false
+            bytes += keySize + 4
+          }
+          current = { value: child.value.value, depth: frame.depth }
+        }
+      }
+    }
+  }
+  return true
 }
 
 export const isAppError = (value: unknown): value is AppError =>
@@ -281,11 +337,12 @@ export const isAppError = (value: unknown): value is AppError =>
 
 export const isQueryBatch = (value: unknown): value is QueryBatch =>
   isRecord(value) &&
-  hasExactKeys(value, ['queryId', 'rows', 'done', 'returnedRows', 'elapsedMs']) &&
+  hasExactKeys(value, ['queryId', 'rows', 'done', 'truncated', 'returnedRows', 'elapsedMs']) &&
   typeof value.queryId === 'string' && value.queryId.length > 0 &&
   Array.isArray(value.rows) &&
-  value.rows.every((row) => Array.isArray(row) && row.every(isCellValue)) &&
+  boundedCellRows(value.rows) &&
   typeof value.done === 'boolean' &&
+  typeof value.truncated === 'boolean' &&
   u64WireDecimal(value.returnedRows) &&
   u64WireDecimal(value.elapsedMs)
 

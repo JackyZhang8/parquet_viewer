@@ -49,7 +49,7 @@ it.each([
 
 it('invokes the filter query lifecycle with typed arguments', async () => {
   const started = { queryId: 'query-1', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] }
-  const batch = { queryId: 'query-1', rows: [['9007199254740993']], done: true, returnedRows: '1', elapsedMs: '7' }
+  const batch = { queryId: 'query-1', rows: [['9007199254740993']], done: true, truncated: false, returnedRows: '1', elapsedMs: '7' }
   invoke.mockResolvedValueOnce(started).mockResolvedValueOnce(batch).mockResolvedValueOnce(undefined)
   const request = { fileId: 'file-1', query: { selectedColumns: [], filters: [], sorts: [], previewLimit: 10000 }, batchSize: 500 }
 
@@ -67,9 +67,9 @@ it.each([
   ['started extra key', { queryId: 'q', columns: [], hidden: true }, 'start'],
   ['started empty query id', { queryId: '', columns: [] }, 'start'],
   ['started malformed column', { queryId: 'q', columns: [{ name: '', logicalType: 'INT64', nullable: false }] }, 'start'],
-  ['batch extra key', { queryId: 'q', rows: [], done: true, returnedRows: '0', elapsedMs: '0', hidden: true }, 'batch'],
-  ['batch unsafe number', { queryId: 'q', rows: [[9007199254740992]], done: true, returnedRows: '1', elapsedMs: '0' }, 'batch'],
-  ['batch malformed counter', { queryId: 'q', rows: [], done: true, returnedRows: '01', elapsedMs: '0' }, 'batch'],
+  ['batch extra key', { queryId: 'q', rows: [], done: true, truncated: false, returnedRows: '0', elapsedMs: '0', hidden: true }, 'batch'],
+  ['batch unsafe number', { queryId: 'q', rows: [[9007199254740992]], done: true, truncated: false, returnedRows: '1', elapsedMs: '0' }, 'batch'],
+  ['batch malformed counter', { queryId: 'q', rows: [], done: true, truncated: false, returnedRows: '01', elapsedMs: '0' }, 'batch'],
 ])('sanitizes malformed query payload: %s', async (_name, payload, command) => {
   invoke.mockResolvedValue(payload)
   const promise = command === 'start'
