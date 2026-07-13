@@ -33,6 +33,7 @@ const api = (overrides: Partial<DesktopApi> = {}): DesktopApi => ({
   openFiles: vi.fn(async (paths: string[]) => paths.map((path, i) => ({ ok: true, metadata: metadata(`f${i}`, path) }) as OpenFileOutcome)),
   closeFile: vi.fn(async () => undefined),
   startFilterQuery: vi.fn(async (): Promise<QueryStarted> => ({ queryId: 'q', columns: [] })),
+  startQuery: vi.fn(async (): Promise<QueryStarted> => ({ queryId: 'q', columns: [] })),
   fetchQueryBatch: vi.fn(async (): Promise<QueryBatch> => ({ queryId: 'q', rows: [], done: true, truncated: false, returnedRows: '0', elapsedMs: '0' })),
   cancelQuery: vi.fn(async () => undefined),
   loadSession: vi.fn(async () => emptyRestore()),
@@ -274,6 +275,71 @@ describe('workspace store', () => {
 
     expect(desktop.startFilterQuery).toHaveBeenCalledWith({ fileId: tab.fileId, query: { selectedColumns: [], filters: [], sorts: [], previewLimit: 10 }, batchSize: 500 })
     expect(store.getState().queriesByTab[tab.id]).toMatchObject({ status: 'running', queryId: 'q1', rows: [[1], [2], [3]], returnedRows: '3', loadingBatch: false })
+  })
+
+  it('runs SQL with the exact bounded request and replaces stale data after start succeeds', async () => {
+    const desktop = api({
+      startQuery: vi.fn(async () => ({ queryId: 'sql', columns: [{ name: 'name', logicalType: 'VARCHAR', nullable: true }] })),
+      fetchQueryBatch: vi.fn(async () => ({ queryId: 'sql', rows: [['new']], done: true, truncated: false, returnedRows: '1', elapsedMs: '3' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runSqlQuery(id, ' SELECT name FROM data ', 123, 45)
+    expect(desktop.startQuery).toHaveBeenCalledWith({ fileId: 'f0', sql: ' SELECT name FROM data ', previewLimit: 123, batchSize: 45 })
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'done', columns: [{ name: 'name' }], rows: [['new']], stale: false })
+  })
+
+  it('preserves last successful rows as stale when a replacement SQL start fails', async () => {
+    const desktop = api({
+      startQuery: vi.fn().mockResolvedValueOnce({ queryId: 'ok', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })
+        .mockRejectedValueOnce({ code: 'SQL_ERROR', message: 'Parser Error at line 2, column 7', detail: null }),
+      fetchQueryBatch: vi.fn(async () => ({ queryId: 'ok', rows: [[7]], done: true, truncated: false, returnedRows: '1', elapsedMs: '2' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runSqlQuery(id, 'SELECT id FROM data')
+    await store.getState().runSqlQuery(id, 'SELECT nope FROM data')
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'error', columns: [{ name: 'id' }], rows: [[7]], stale: true, error: { code: 'SQL_ERROR' } })
+  })
+
+  it.each([
+    ['', /empty/i], ['   ', /empty/i], ['x'.repeat(262_145), /256/],
+  ])('rejects invalid SQL locally: %s', async (sql, message) => {
+    const desktop = api(); const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runSqlQuery(id, sql)
+    expect(desktop.startQuery).not.toHaveBeenCalled()
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'error', stale: false, error: { code: 'INVALID_ARGUMENT', message: expect.stringMatching(message) } })
+  })
+
+  it('validates SQL preview and batch limits locally', async () => {
+    const desktop = api(); const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runSqlQuery(id, 'SELECT 1', 0, 500)
+    await store.getState().runSqlQuery(id, 'SELECT 1', 1, 5001)
+    expect(desktop.startQuery).not.toHaveBeenCalled()
+    expect(store.getState().queriesByTab[id].error).toMatchObject({ code: 'INVALID_ARGUMENT' })
+  })
+
+  it('ignores even invalid query starts from an inactive tab callback', async () => {
+    const desktop = api(); const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a', '/b']); const [a, b] = store.getState().tabs
+    store.getState().activateTab(b.id)
+    await store.getState().runSqlQuery(a.id, '')
+    await store.getState().runFilterQuery(a.id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 0 })
+    expect(store.getState().queriesByTab[a.id]).toBeUndefined()
+    expect(desktop.startQuery).not.toHaveBeenCalled()
+    expect(desktop.startFilterQuery).not.toHaveBeenCalled()
+  })
+
+  it('cancels and isolates late SQL/filter replacements through one generation lifecycle', async () => {
+    const old = deferred<QueryStarted>()
+    const desktop = api({
+      startQuery: vi.fn(() => old.promise),
+      startFilterQuery: vi.fn(async () => ({ queryId: 'filter', columns: [] })),
+      fetchQueryBatch: vi.fn(async (queryId) => ({ queryId, rows: [], done: true, truncated: false, returnedRows: '0', elapsedMs: '1' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    const sql = store.getState().runSqlQuery(id, 'SELECT * FROM data')
+    await store.getState().runFilterQuery(id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 5 })
+    old.resolve({ queryId: 'late-sql', columns: [] }); await sql
+    expect(store.getState().queriesByTab[id]).toMatchObject({ queryId: 'filter', status: 'done' })
+    expect(desktop.cancelQuery).toHaveBeenCalledWith('late-sql')
   })
 
   it('reports queued while awaiting backend query admission', async () => {

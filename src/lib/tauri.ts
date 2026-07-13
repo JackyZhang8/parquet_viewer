@@ -3,7 +3,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { open } from '@tauri-apps/plugin-dialog'
 import { revealItemInDir as reveal } from '@tauri-apps/plugin-opener'
 import type {
-  AppError, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryStarted, RestoredSession,
+  AppError, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted, RestoredSession,
   SessionSnapshot,
 } from '../domain/types'
 import { isAppError, isQueryBatch, isSessionScalar } from '../domain/types'
@@ -16,6 +16,7 @@ export interface DesktopApi {
   openFiles(paths: string[]): Promise<OpenFileOutcome[]>
   closeFile(fileId: string): Promise<void>
   startFilterQuery(request: FilterQueryStartRequest): Promise<QueryStarted>
+  startQuery(request: QueryRequest): Promise<QueryStarted>
   fetchQueryBatch(queryId: string): Promise<QueryBatch>
   cancelQuery(queryId: string): Promise<void>
   loadSession(): Promise<RestoredSession>
@@ -141,6 +142,9 @@ export const desktopApi: DesktopApi = {
   closeFile: (fileId) => invoke('close_file', { fileId }),
   async startFilterQuery(request) {
     return queryStarted(await invoke('start_filter_query', { request }))
+  },
+  async startQuery(request) {
+    return queryStarted(await invoke('start_query', { request }))
   },
   async fetchQueryBatch(queryId) {
     return queryBatch(await invoke('fetch_query_batch', { queryId }))

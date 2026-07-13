@@ -63,6 +63,18 @@ it('invokes the filter query lifecycle with typed arguments', async () => {
   ])
 })
 
+it('invokes raw SQL with an exact QueryRequest and validates QueryStarted', async () => {
+  const started = { queryId: 'sql-1', columns: [{ name: 'total', logicalType: 'HUGEINT', nullable: true }] }
+  invoke.mockResolvedValue(started)
+  const request = { fileId: 'file-1', sql: 'SELECT count(*) AS total FROM data', batchSize: 250, previewLimit: 9000 }
+
+  await expect(desktopApi.startQuery(request)).resolves.toEqual(started)
+  expect(invoke).toHaveBeenCalledWith('start_query', { request })
+
+  invoke.mockResolvedValue({ ...started, debug: '/private/path' })
+  await expect(desktopApi.startQuery(request)).rejects.toEqual({ code: 'INTERNAL_ERROR', message: 'An internal error occurred', detail: null })
+})
+
 it.each([
   ['started extra key', { queryId: 'q', columns: [], hidden: true }, 'start'],
   ['started empty query id', { queryId: '', columns: [] }, 'start'],

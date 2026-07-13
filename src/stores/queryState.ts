@@ -3,6 +3,7 @@ import type { AppError, CellValue, ColumnSchema } from '../domain/types'
 export type QueryStatus = 'idle' | 'queued' | 'running' | 'done' | 'cancelled' | 'error'
 
 export interface QueryViewState {
+  source?: 'filter' | 'sql'
   status: QueryStatus
   queryId?: string
   columns: ColumnSchema[]

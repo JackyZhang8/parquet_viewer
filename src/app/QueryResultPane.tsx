@@ -13,7 +13,7 @@ interface Props {
 
 export function QueryResultPane({ query, initialScroll, onScrollChange, onLoadMore, onCancel }: Props) {
   const [visibleRange, setVisibleRange] = useState<[number, number] | null>(null)
-  if (!query || query.status === 'idle') return <div className="result-placeholder"><strong>No query result</strong><p>Run filters to preview rows.</p></div>
+  if (!query || query.status === 'idle') return <div className="result-placeholder"><strong>No query result</strong><p>Run a query to preview rows.</p></div>
   return <div className="result-pane">
     <DataGrid queryKey={`${query.generation}:${query.queryId ?? 'queued'}`} columns={query.columns} rows={query.rows} status={query.status} done={query.done} loading={query.loadingBatch}
       initialScroll={initialScroll} onScrollChange={onScrollChange} onLoadMore={onLoadMore} onVisibleRangeChange={setVisibleRange} />

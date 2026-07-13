@@ -6,6 +6,15 @@ import type { DesktopApi } from '../lib/tauri'
 import { createWorkspaceStore } from '../stores/workspace'
 import { App } from './App'
 
+vi.mock('@monaco-editor/react', async () => {
+  const React = await import('react')
+  return { default: (props: Record<string, unknown>) => React.createElement('textarea', {
+    'aria-label': (props.options as { ariaLabel: string }).ariaLabel,
+    value: props.value as string,
+    onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => (props.onChange as Function)(event.target.value),
+  }) }
+})
+
 const deferred = <T,>() => {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((done) => { resolve = done })
@@ -16,6 +25,7 @@ const api = (): DesktopApi => ({
   openFiles: vi.fn(async (paths: string[]) => paths.map((path) => ({ ok: true as const, metadata: { fileId: path, path, name: path.split('/').pop()!, sizeBytes: '1', rowCount: '1', rowGroupCount: 1, columns: [] } }))),
   closeFile: vi.fn(async () => undefined),
   startFilterQuery: vi.fn(async () => ({ queryId: 'q', columns: [] })),
+  startQuery: vi.fn(async () => ({ queryId: 'sql-q', columns: [] })),
   fetchQueryBatch: vi.fn(async () => ({ queryId: 'q', rows: [], done: true, truncated: false, returnedRows: '0', elapsedMs: '0' })),
   cancelQuery: vi.fn(async () => undefined),
   loadSession: vi.fn(async () => ({ snapshot: { version: 1, tabs: [], activeTabId: null }, unavailableTabIds: [], warning: null })),
@@ -67,6 +77,32 @@ it('runs filters into isolated per-tab result grids without introducing a SQL ed
   expect(screen.getByText(/id equals/i)).toBeInTheDocument()
   expect(screen.getByRole('gridcell', { name: /q-a/i })).toBeInTheDocument()
   expect(screen.queryByRole('textbox',{name:/sql/i})).not.toBeInTheDocument()
+})
+
+it('toggles SQL per tab, restores drafts/heights, runs into the same isolated grid, and never runs on hydrate', async () => {
+  const desktop = api()
+  vi.mocked(desktop.loadSession).mockResolvedValue({snapshot:{version:1,activeTabId:'a',tabs:[
+    {id:'a',fileId:'a',path:'/a.parquet',sqlDraft:'SELECT alpha FROM data',filters:[],sorts:[],viewState:{scrollTop:0,scrollLeft:0,sidebarWidth:260,editorHeight:210}},
+    {id:'b',fileId:'b',path:'/b.parquet',sqlDraft:'SELECT beta FROM data',filters:[],sorts:[],viewState:{scrollTop:0,scrollLeft:0,sidebarWidth:260,editorHeight:260}},
+  ]},unavailableTabIds:[],warning:null})
+  vi.mocked(desktop.openFiles).mockImplementation(async (paths) => paths.map((path)=>({ok:true as const,metadata:{fileId:path.slice(1,2),path,name:path.slice(1),sizeBytes:'1',rowCount:'1',rowGroupCount:1,columns:[{name:path.includes('a.')?'alpha':'beta',logicalType:'VARCHAR',nullable:false}]}})))
+  vi.mocked(desktop.startQuery).mockImplementation(async ({ fileId }) => ({ queryId: `sql-${fileId}`, columns: [{name:fileId === 'a' ? 'alpha' : 'beta',logicalType:'VARCHAR',nullable:false}] }))
+  vi.mocked(desktop.fetchQueryBatch).mockImplementation(async (queryId) => ({ queryId, rows: [[queryId]], done: true, truncated: false, returnedRows: '1', elapsedMs: '2' }))
+  render(<App api={desktop} />)
+  await screen.findByRole('tab', { name: /a.parquet/i })
+  expect(desktop.startQuery).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('tab', { name: 'SQL' }))
+  expect(screen.getByRole('textbox', { name: 'SQL editor' })).toHaveValue('SELECT alpha FROM data')
+  await userEvent.click(screen.getByRole('button', { name: 'Run SQL' }))
+  expect(await screen.findByRole('gridcell', { name: /sql-a/ })).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('tab', { name: /b.parquet/i }))
+  expect(screen.getByRole('tab', { name: 'Filter' })).toHaveAttribute('aria-selected', 'true')
+  await userEvent.click(screen.getByRole('tab', { name: 'SQL' }))
+  expect(screen.getByRole('textbox', { name: 'SQL editor' })).toHaveValue('SELECT beta FROM data')
+  expect(screen.queryByRole('grid')).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('tab', { name: /a.parquet/i }))
+  expect(screen.getByRole('textbox', { name: 'SQL editor' })).toHaveValue('SELECT alpha FROM data')
+  expect(screen.getByRole('gridcell', { name: /sql-a/ })).toBeInTheDocument()
 })
 
 it('does not leak schema search or collapse state between tabs', async () => {
