@@ -1,4 +1,5 @@
 import type { ColumnSchema } from '../../domain/types'
+import { dollarDelimiterAt } from './sqlLexing'
 
 export type SqlSuggestionKind = 'field' | 'table' | 'keyword' | 'function'
 export type SqlFieldType = 'boolean' | 'numeric' | 'text' | 'temporal' | 'binary' | 'nested' | 'unknown'
@@ -29,6 +30,14 @@ const KEYWORDS = [
   'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'INNER JOIN', 'ON', 'AS', 'DISTINCT',
   'AND', 'OR', 'NOT', 'NULL', 'IS NULL', 'IS NOT NULL', 'ASC', 'DESC', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
 ]
+const RESERVED_WORDS = new Set([
+  ...KEYWORDS.flatMap((keyword) => keyword.toLowerCase().split(' ')),
+  ...'all alter analyze attach between by cast check create cross current delete describe drop exists explain false in insert intersect into lateral like natural primary qualify references returning table true union unique update using values with'.split(' '),
+])
+
+export const quoteSqlIdentifier = (name: string): string =>
+  /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !RESERVED_WORDS.has(name.toLowerCase())
+    ? name : `"${name.replaceAll('"', '""')}"`
 
 const FUNCTIONS: Array<[string, string]> = [
   ['count', 'count(${1:*})'], ['sum', 'sum(${1:column})'], ['avg', 'avg(${1:column})'],
@@ -38,13 +47,14 @@ const FUNCTIONS: Array<[string, string]> = [
   ['strftime', "strftime(${1:column}, '${2:%Y-%m-%d}')"], ['extract', 'extract(${1:part} FROM ${2:column})'],
 ]
 
-export const quoteSqlIdentifier = (name: string): string =>
-  /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`
-
 const inNonCode = (sql: string, offset: number): boolean => {
-  let single = false; let line = false; let block = false
+  let single = false; let line = false; let block = false; let dollar: string | null = null
   for (let index = 0; index < offset; index += 1) {
     const char = sql[index]; const next = sql[index + 1]
+    if (dollar) {
+      if (sql.startsWith(dollar, index)) { index += dollar.length - 1; dollar = null }
+      continue
+    }
     if (line) { if (char === '\n') line = false; continue }
     if (block) { if (char === '*' && next === '/') { block = false; index += 1 }; continue }
     if (single) {
@@ -52,11 +62,13 @@ const inNonCode = (sql: string, offset: number): boolean => {
       if (char === "'") single = false
       continue
     }
-    if (char === '-' && next === '-') { line = true; index += 1 }
+    const delimiter = dollarDelimiterAt(sql, index)
+    if (delimiter) { dollar = delimiter; index += delimiter.length - 1 }
+    else if (char === '-' && next === '-') { line = true; index += 1 }
     else if (char === '/' && next === '*') { block = true; index += 1 }
     else if (char === "'") single = true
   }
-  return single || line || block
+  return single || line || block || dollar !== null
 }
 
 const matchScore = (candidate: string, token: string): number | null => {

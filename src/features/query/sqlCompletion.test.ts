@@ -24,7 +24,16 @@ describe('SQL completion', () => {
     expect(quoteSqlIdentifier('simple_name')).toBe('simple_name')
     expect(quoteSqlIdentifier('order value')).toBe('"order value"')
     expect(quoteSqlIdentifier('say"hi')).toBe('"say""hi"')
+    expect(quoteSqlIdentifier('select')).toBe('"select"')
+    expect(quoteSqlIdentifier('FROM')).toBe('"FROM"')
+    expect(quoteSqlIdentifier('order')).toBe('"order"')
     expect(getSqlCompletions('SELECT ord', 10, columns)[0]).toMatchObject({ label: 'order value', insertText: '"order value"' })
+  })
+
+  it('suppresses completion inside dollar-quoted and unterminated dollar strings', () => {
+    expect(getSqlCompletions('SELECT $$from wh', 16, columns)).toEqual([])
+    expect(getSqlCompletions('SELECT $tag$from\nwh', 19, columns)).toEqual([])
+    expect(getSqlCompletions('SELECT $$body$$, ', 17, columns).length).toBeGreaterThan(0)
   })
 
   it('uses deterministic subsequence matching and exposes function snippets', () => {

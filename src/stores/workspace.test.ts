@@ -300,6 +300,39 @@ describe('workspace store', () => {
     expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'error', columns: [{ name: 'id' }], rows: [[7]], stale: true, error: { code: 'SQL_ERROR' } })
   })
 
+  it('treats a completed zero-row result as successful when a replacement fails', async () => {
+    const desktop = api({
+      startQuery: vi.fn().mockResolvedValueOnce({ queryId: 'empty', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })
+        .mockRejectedValueOnce({ code: 'SQL_ERROR', message: 'bad', detail: null }),
+      fetchQueryBatch: vi.fn(async () => ({ queryId: 'empty', rows: [], done: true, truncated: false, returnedRows: '0', elapsedMs: '1' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runSqlQuery(id, 'SELECT id FROM data WHERE false')
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'done', rows: [], hasSuccessfulResult: true })
+    await store.getState().runSqlQuery(id, 'SELECT nope FROM data')
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'error', rows: [], stale: true, hasSuccessfulResult: true })
+  })
+
+  it('does not preserve partial running rows as a successful result on replacement failure', async () => {
+    const desktop = api({
+      startQuery: vi.fn().mockResolvedValueOnce({ queryId: 'partial', columns: [{ name: 'id', logicalType: 'INT64', nullable: false }] })
+        .mockRejectedValueOnce({ code: 'SQL_ERROR', message: 'bad', detail: null }),
+      fetchQueryBatch: vi.fn(async () => ({ queryId: 'partial', rows: [[1]], done: false, truncated: false, returnedRows: '1', elapsedMs: '1' })),
+    })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runSqlQuery(id, 'SELECT id FROM data')
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'running', rows: [[1]], hasSuccessfulResult: false })
+    await store.getState().runSqlQuery(id, 'SELECT nope FROM data')
+    expect(store.getState().queriesByTab[id]).toMatchObject({ status: 'error', rows: [], stale: false, hasSuccessfulResult: false })
+  })
+
+  it('records the exact submitted SQL revision on SQL errors', async () => {
+    const desktop = api({ startQuery: vi.fn(async () => { throw { code: 'SQL_ERROR', message: 'bad', detail: null } }) })
+    const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/a']); const id = store.getState().tabs[0].id
+    await store.getState().runSqlQuery(id, 'SELECT submitted FROM data')
+    expect(store.getState().queriesByTab[id]).toMatchObject({ source: 'sql', submittedSql: 'SELECT submitted FROM data', status: 'error' })
+  })
+
   it.each([
     ['', /empty/i], ['   ', /empty/i], ['x'.repeat(262_145), /256/],
   ])('rejects invalid SQL locally: %s', async (sql, message) => {

@@ -165,26 +165,29 @@ export const createWorkspaceStore = (
   const invalidArgument = (message: string): AppError => ({ code: 'INVALID_ARGUMENT', message, detail: null })
   const canRunQuery = (tabId: string) => store.getState().activeTabId === tabId &&
     store.getState().tabs.some((tab) => tab.id === tabId && tab.status === 'ready')
-  const beginInvalidQuery = (tabId: string, source: 'filter' | 'sql', error: AppError) => {
+  const beginInvalidQuery = (tabId: string, source: 'filter' | 'sql', error: AppError, submittedSql?: string) => {
     const previous = store.getState().queriesByTab[tabId] ?? idleQueryState()
     if (previous.queryId) void api.cancelQuery(previous.queryId).catch(() => undefined)
+    const preserved = previous.hasSuccessfulResult ? previous : idleQueryState(previous.generation)
     store.setState((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
-      ...previous, status: 'error', queryId: undefined, loadingBatch: false, done: false,
-      stale: previous.rows.length > 0, generation: previous.generation + 1, error, source,
+      ...preserved, status: 'error', queryId: undefined, loadingBatch: false, done: false,
+      stale: previous.hasSuccessfulResult, generation: previous.generation + 1, error, source, submittedSql,
     } } }))
   }
   const runQuery = async (
     tabId: string, source: 'filter' | 'sql', previewLimit: number, batchSize: number,
     start: (tab: WorkspaceTab) => Promise<{ queryId: string; columns: FileMetadata['columns'] }>,
+    submittedSql?: string,
   ) => {
     const tab = store.getState().tabs.find((item) => item.id === tabId)
     if (!tab || tab.status !== 'ready' || store.getState().activeTabId !== tabId) return
     const previous = store.getState().queriesByTab[tabId] ?? idleQueryState()
     const generation = previous.generation + 1
     if (previous.queryId) void api.cancelQuery(previous.queryId).catch(() => undefined)
+    const preserved = previous.hasSuccessfulResult ? previous : idleQueryState(previous.generation)
     store.setState((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
-      ...previous, status: 'queued', error: undefined, loadingBatch: false, done: false,
-      stale: previous.rows.length > 0, generation, queryId: undefined, source,
+      ...preserved, status: 'queued', error: undefined, loadingBatch: false, done: false,
+      stale: previous.hasSuccessfulResult, generation, queryId: undefined, source, submittedSql,
     } } }))
     try {
       const started = await start(tab)
@@ -195,14 +198,14 @@ export const createWorkspaceStore = (
       }
       queryLimits.set(tabId, previewLimit)
       store.setState((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
-        ...idleQueryState(generation), status: 'running', queryId: started.queryId, columns: started.columns, source,
+        ...idleQueryState(generation), status: 'running', queryId: started.queryId, columns: started.columns, source, submittedSql,
       } } }))
       await store.getState().loadNextBatch(tabId)
     } catch (error) {
       const current = store.getState().queriesByTab[tabId]
       if (!current || current.generation !== generation) return
       store.setState((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
-        ...current, status: 'error', loadingBatch: false, stale: current.rows.length > 0, error: sanitized(error),
+        ...current, status: 'error', loadingBatch: false, stale: current.hasSuccessfulResult, error: sanitized(error),
       } } }))
     }
   }
@@ -295,15 +298,15 @@ export const createWorkspaceStore = (
     },
     async runSqlQuery(tabId, sql, previewLimit = 10_000, batchSize = 500) {
       if (!canRunQuery(tabId)) return
-      if (sql.trim().length === 0) { beginInvalidQuery(tabId, 'sql', invalidArgument('SQL query must not be empty')); return }
-      if (utf8.encode(sql).length > 256 * 1024) { beginInvalidQuery(tabId, 'sql', invalidArgument('SQL query must not exceed 256 KiB')); return }
+      if (sql.trim().length === 0) { beginInvalidQuery(tabId, 'sql', invalidArgument('SQL query must not be empty'), sql); return }
+      if (utf8.encode(sql).length > 256 * 1024) { beginInvalidQuery(tabId, 'sql', invalidArgument('SQL query must not exceed 256 KiB'), sql); return }
       if (!Number.isSafeInteger(previewLimit) || previewLimit < 1 || previewLimit > 10_000) {
-        beginInvalidQuery(tabId, 'sql', invalidArgument('Preview limit must be between 1 and 10000')); return
+        beginInvalidQuery(tabId, 'sql', invalidArgument('Preview limit must be between 1 and 10000'), sql); return
       }
       if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 5_000) {
-        beginInvalidQuery(tabId, 'sql', invalidArgument('Batch size must be between 1 and 5000')); return
+        beginInvalidQuery(tabId, 'sql', invalidArgument('Batch size must be between 1 and 5000'), sql); return
       }
-      await runQuery(tabId, 'sql', previewLimit, batchSize, (tab) => api.startQuery({ fileId: tab.fileId, sql, previewLimit, batchSize }))
+      await runQuery(tabId, 'sql', previewLimit, batchSize, (tab) => api.startQuery({ fileId: tab.fileId, sql, previewLimit, batchSize }), sql)
     },
     async loadNextBatch(tabId) {
       const query = get().queriesByTab[tabId]
@@ -325,6 +328,7 @@ export const createWorkspaceStore = (
         set((state) => ({ queriesByTab: { ...state.queriesByTab, [tabId]: {
           ...current, rows, done, status: done ? 'done' : 'running', returnedRows: batch.returnedRows,
           elapsedMs: batch.elapsedMs, loadingBatch: false, truncated, stale: false,
+          hasSuccessfulResult: done,
         } } }))
       } catch (error) {
         const current = get().queriesByTab[tabId]

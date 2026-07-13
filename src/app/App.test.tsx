@@ -17,8 +17,9 @@ vi.mock('@monaco-editor/react', async () => {
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => { resolve = done })
-  return { promise, resolve }
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 
 const api = (): DesktopApi => ({
@@ -103,6 +104,36 @@ it('toggles SQL per tab, restores drafts/heights, runs into the same isolated gr
   await userEvent.click(screen.getByRole('tab', { name: /a.parquet/i }))
   expect(screen.getByRole('textbox', { name: 'SQL editor' })).toHaveValue('SELECT alpha FROM data')
   expect(screen.getByRole('gridcell', { name: /sql-a/ })).toBeInTheDocument()
+})
+
+it('provides roving keyboard query-mode tabs with associated tabpanels', async () => {
+  const desktop = api(); const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/keys.parquet'])
+  render(<App api={desktop} store={store} />)
+  const filter = screen.getByRole('tab', { name: 'Filter' }); const sql = screen.getByRole('tab', { name: 'SQL' })
+  expect(filter).toHaveAttribute('tabindex', '0'); expect(sql).toHaveAttribute('tabindex', '-1')
+  expect(filter).toHaveAttribute('aria-controls', expect.stringContaining('filter-panel'))
+  expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', filter.id)
+  filter.focus(); await userEvent.keyboard('{ArrowRight}')
+  expect(sql).toHaveFocus(); expect(sql).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', sql.id)
+  await userEvent.keyboard('{Home}')
+  expect(filter).toHaveFocus(); expect(filter).toHaveAttribute('aria-selected', 'true')
+  await userEvent.keyboard('{End}')
+  expect(sql).toHaveFocus()
+})
+
+it('does not attach a late SQL error marker/detail to a modified draft', async () => {
+  const desktop = api(); const pending = deferred<never>()
+  vi.mocked(desktop.startQuery).mockImplementation(() => pending.promise)
+  const store = createWorkspaceStore(desktop); await store.getState().openPaths(['/revision.parquet']); const tab = store.getState().tabs[0]
+  store.getState().setSqlDraft(tab.id, 'SELECT missing FROM data')
+  render(<App api={desktop} store={store} />)
+  await userEvent.click(screen.getByRole('tab', { name: 'SQL' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Run SQL' }))
+  await userEvent.type(screen.getByRole('textbox', { name: 'SQL editor' }), ' -- changed')
+  pending.reject({ code: 'SQL_ERROR', message: 'The query failed', detail: 'Binder Error\nline 1 column 8' })
+  expect(await screen.findByRole('alert')).toHaveTextContent('SQL_ERROR')
+  expect(screen.queryByText('Error details')).not.toBeInTheDocument()
 })
 
 it('does not leak schema search or collapse state between tabs', async () => {

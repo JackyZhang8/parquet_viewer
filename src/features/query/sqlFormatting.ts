@@ -1,10 +1,16 @@
+import { dollarDelimiterAt } from './sqlLexing'
+
 const protectSql = (sql: string): { text: string; protectedParts: string[] } => {
   const protectedParts: string[] = []
   let text = ''
   for (let index = 0; index < sql.length;) {
     const char = sql[index]; const next = sql[index + 1]
     let end = index
-    if (char === "'" || char === '"') {
+    const dollar = dollarDelimiterAt(sql, index)
+    if (dollar) {
+      const close = sql.indexOf(dollar, index + dollar.length)
+      end = close < 0 ? sql.length : close + dollar.length
+    } else if (char === "'" || char === '"') {
       const quote = char; end += 1
       while (end < sql.length) {
         if (sql[end] === quote && sql[end + 1] === quote) { end += 2; continue }

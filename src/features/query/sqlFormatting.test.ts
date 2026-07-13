@@ -18,3 +18,9 @@ it('preserves the newline that terminates a line comment', () => {
   expect(formatSql('select 1 -- keep addition outside comment\n+ 2')).toBe('SELECT 1 -- keep addition outside comment\n+ 2')
   expect(formatSql('select 1 /* from remains a comment */ + 2')).toBe('SELECT 1 /* from remains a comment */ + 2')
 })
+
+it('preserves dollar-quoted literals including tags, multiline text, and unterminated bodies', () => {
+  expect(formatSql('select $$from where\nselect$$ as body from data')).toBe('SELECT $$from where\nselect$$ AS body\nFROM data')
+  expect(formatSql('select $tag$order by x$tag$ from data')).toBe('SELECT $tag$order by x$tag$\nFROM data')
+  expect(formatSql('select $$unterminated from where')).toBe('SELECT $$unterminated from where')
+})

@@ -4,6 +4,8 @@ export type QueryStatus = 'idle' | 'queued' | 'running' | 'done' | 'cancelled' |
 
 export interface QueryViewState {
   source?: 'filter' | 'sql'
+  submittedSql?: string
+  hasSuccessfulResult: boolean
   status: QueryStatus
   queryId?: string
   columns: ColumnSchema[]
@@ -20,7 +22,7 @@ export interface QueryViewState {
 
 export const idleQueryState = (generation = 0): QueryViewState => ({
   status: 'idle', columns: [], rows: [], done: false, returnedRows: '0', elapsedMs: '0',
-  loadingBatch: false, truncated: false, stale: false, generation,
+  loadingBatch: false, truncated: false, stale: false, hasSuccessfulResult: false, generation,
 })
 
 export const internalQueryError = (): AppError => ({

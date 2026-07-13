@@ -147,6 +147,7 @@ fn redact_absolute_paths(line: &str) -> String {
             || chars[index - 1].is_whitespace()
             || matches!(chars[index - 1], '(' | '[' | '{' | ':' | '=');
         let unix = boundary && chars[index] == '/';
+        let unc = boundary && chars[index] == '\\' && chars.get(index + 1) == Some(&'\\');
         let windows = boundary
             && chars
                 .get(index)
@@ -155,9 +156,15 @@ fn redact_absolute_paths(line: &str) -> String {
             && chars
                 .get(index + 2)
                 .is_some_and(|char| matches!(char, '/' | '\\'));
-        if unix || windows {
+        if unix || windows || unc {
             output.push_str("[path]");
-            index += if windows { 3 } else { 1 };
+            index += if windows {
+                3
+            } else if unc {
+                2
+            } else {
+                1
+            };
             while index < chars.len()
                 && !chars[index].is_whitespace()
                 && !matches!(chars[index], ',' | ';' | ')' | ']' | '}')
@@ -361,7 +368,7 @@ mod tests {
     fn located_sql_error_serializes_a_useful_summary_without_sensitive_source() {
         let error = AppError::sql_with_source(
             "The query could not be prepared or executed",
-            "Binder Error: Could not convert string 'super-secret' from /Users/alice/private.parquet\nCandidate bindings: \"safe_col\"\nWindows source C:\\Users\\alice\\secret.parquet and /proc/self/fd/9\nLINE 12: SELECT 'super-secret' FROM read_parquet('/dev/fd/42')\n                         ^\ninternal temp /tmp/parquet-viewer/query-1\u{7}",
+            "Binder Error: Could not convert string 'super-secret' from /Users/alice/private.parquet\nCandidate bindings: \"safe_col\"\nWindows source C:\\Users\\alice\\secret.parquet, \\\\server\\share\\secret.parquet, //server/share/other.parquet and /proc/self/fd/9\nLINE 12: SELECT 'super-secret' FROM read_parquet('/dev/fd/42')\n                         ^\ninternal temp /tmp/parquet-viewer/query-1\u{7}",
         );
 
         let wire = serde_json::to_value(error).unwrap();
@@ -384,6 +391,8 @@ mod tests {
             "private.parquet",
             "/Users/",
             "C:\\Users",
+            "\\\\server\\share",
+            "//server/share",
             "/proc/self/fd",
             "SELECT",
             "/dev/fd",
