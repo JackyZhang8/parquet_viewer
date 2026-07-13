@@ -1,7 +1,12 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+/// <reference types="node" />
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
 import { DataGrid } from './DataGrid'
+
+const appCss = readFileSync(resolve(process.cwd(), 'src/app/app.css'), 'utf8')
 
 const columns = (count: number) => Array.from({ length: count }, (_, index) => ({
   name: `column_${index}`, logicalType: index % 2 ? 'VARCHAR' : 'INT64', nullable: true,
@@ -168,11 +173,44 @@ it('indexes virtualized headers and cells by visible ARIA order', async () => {
 it('reports the viewport range without virtualizer overscan', async () => {
   const onVisibleRangeChange = vi.fn()
   render(<DataGrid queryKey="range" columns={columns(1)} rows={Array.from({ length: 100 }, (_, index) => [index])} status="done" done onVisibleRangeChange={onVisibleRangeChange} />)
-  await waitFor(() => expect(onVisibleRangeChange).toHaveBeenLastCalledWith([1, 12]))
+  await waitFor(() => expect(onVisibleRangeChange).toHaveBeenLastCalledWith([1, 11]))
   const grid = screen.getByRole('grid')
-  Object.defineProperty(grid, 'clientHeight', { configurable: true, value: 90 })
+  Object.defineProperty(grid, 'clientHeight', { configurable: true, value: 134 })
   fireEvent.scroll(grid, { target: { scrollTop: 300 } })
   await waitFor(() => expect(onVisibleRangeChange).toHaveBeenLastCalledWith([11, 13]))
+})
+
+it('recomputes the body viewport range on container-only resize', async () => {
+  const callbacks: ResizeObserverCallback[] = []
+  class FakeResizeObserver {
+    constructor(callback: ResizeObserverCallback) { callbacks.push(callback) }
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  }
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+  try {
+    const onVisibleRangeChange = vi.fn()
+    render(<DataGrid queryKey="resize-range" columns={columns(1)} rows={Array.from({ length: 100 }, (_, index) => [index])} status="done" done onVisibleRangeChange={onVisibleRangeChange} />)
+    const grid = screen.getByRole('grid')
+    Object.defineProperty(grid, 'clientHeight', { configurable: true, value: 104 })
+    act(() => callbacks.forEach((callback) => callback([], {} as ResizeObserver)))
+    await waitFor(() => expect(onVisibleRangeChange).toHaveBeenLastCalledWith([1, 2]))
+  } finally { vi.unstubAllGlobals() }
+})
+
+it('exposes detail as nonmodal and does not trap Tab', async () => {
+  render(<DataGrid queryKey="nonmodal" columns={columns(1)} rows={[[{ nested: true }]]} status="done" done />)
+  const cell = screen.getByRole('gridcell'); await userEvent.click(cell)
+  const dialog = screen.getByRole('dialog'); expect(dialog).not.toHaveAttribute('aria-modal')
+  const close = screen.getByRole('button', { name: 'Close detail' }); expect(close).toHaveFocus()
+  await userEvent.tab(); expect(close).not.toHaveFocus()
+  await userEvent.keyboard('{Escape}'); expect(cell).toHaveFocus()
+})
+
+it('keeps the corner header sticky on both axes', () => {
+  expect(appCss).toMatch(/\.header-number\s*\{[^}]*position\s*:\s*sticky[^}]*left\s*:\s*0/s)
+  expect(appCss).not.toMatch(/\.header-number\s*\{[^}]*position\s*:\s*absolute/s)
 })
 
 it('shows visible copy success and error feedback', async () => {

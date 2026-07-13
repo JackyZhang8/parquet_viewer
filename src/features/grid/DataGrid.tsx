@@ -21,6 +21,8 @@ interface Props {
 }
 
 const ROW_HEIGHT = 30
+const HEADER_HEIGHT = 44
+const FALLBACK_VIEWPORT_HEIGHT = 360
 const ROW_NUMBER_WIDTH = 56
 const MIN_WIDTH = 80
 const MAX_WIDTH = 480
@@ -54,7 +56,18 @@ export function DataGrid(props: Props) {
   const [focus, setFocus] = useState<Point | null>(null)
   const [detail, setDetail] = useState<Detail | null>(null)
   const [copyFeedback, setCopyFeedback] = useState<{ message: string; ok: boolean } | null>(null)
+  const [viewport, setViewport] = useState(() => ({
+    scrollTop: props.initialScroll?.top ?? 0,
+    bodyHeight: FALLBACK_VIEWPORT_HEIGHT - HEADER_HEIGHT,
+  }))
   const setScrollRef = useCallback((node: HTMLDivElement | null) => { scrollRef.current = node; setScrollElement(node) }, [])
+  const measureViewport = useCallback((element: HTMLDivElement) => {
+    const next = {
+      scrollTop: element.scrollTop,
+      bodyHeight: Math.max(0, (element.clientHeight || FALLBACK_VIEWPORT_HEIGHT) - HEADER_HEIGHT),
+    }
+    setViewport((current) => current.scrollTop === next.scrollTop && current.bodyHeight === next.bodyHeight ? current : next)
+  }, [])
   const visible = useMemo(() => columns.map((column, index) => ({ column, index })).filter(({ index }) => !hidden.has(index)), [columns, hidden])
   const visiblePosition = useCallback((column: number) => visible.findIndex(({ index }) => index === column), [visible])
   useEffect(() => setWidths((current) => columns.map((column, index) => current[index] ?? defaultWidth(column))), [columns])
@@ -77,13 +90,19 @@ export function DataGrid(props: Props) {
   useEffect(() => {
     visible.forEach(({ index }, visibleIndex) => columnVirtualizer.resizeItem(visibleIndex, widths[index]))
   }, [columnVirtualizer, visible, widths])
-  const reportVisibleRange = useCallback((scrollTop: number, height: number) => {
+  useEffect(() => {
+    if (!scrollElement) return
+    const update = () => measureViewport(scrollElement)
+    update()
+    if (typeof ResizeObserver === 'undefined') { window.addEventListener('resize', update); return () => window.removeEventListener('resize', update) }
+    const observer = new ResizeObserver(update); observer.observe(scrollElement); return () => observer.disconnect()
+  }, [measureViewport, scrollElement])
+  useEffect(() => {
     if (!rows.length) { onVisibleRangeChange?.(null); return }
-    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT))
-    const end = Math.min(rows.length, Math.ceil((scrollTop + (height || 360)) / ROW_HEIGHT))
+    const start = Math.min(rows.length - 1, Math.max(0, Math.floor(viewport.scrollTop / ROW_HEIGHT)))
+    const end = Math.min(rows.length, Math.ceil((viewport.scrollTop + viewport.bodyHeight) / ROW_HEIGHT))
     onVisibleRangeChange?.([start + 1, Math.max(start + 1, end)])
-  }, [onVisibleRangeChange, rows.length])
-  useEffect(() => { reportVisibleRange(scrollElement?.scrollTop ?? 0, scrollElement?.clientHeight ?? 360) }, [reportVisibleRange, scrollElement])
+  }, [onVisibleRangeChange, rows.length, viewport])
   useEffect(() => {
     lastLoadSize.current = null; setAnchor(null); setFocus(null); setDetail(null); setCopyFeedback(null)
     setHidden(new Set()); setWidths(columns.map(defaultWidth)); setMenuOpen(false)
@@ -168,7 +187,7 @@ export function DataGrid(props: Props) {
   const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
     const target = event.currentTarget
     props.onScrollChange?.({ top: target.scrollTop, left: target.scrollLeft })
-    reportVisibleRange(target.scrollTop, target.clientHeight)
+    measureViewport(target)
     if (status === 'running' && !done && !loading && target.scrollTop + target.clientHeight >= target.scrollHeight - ROW_HEIGHT * 4 && lastLoadSize.current !== rows.length) {
       lastLoadSize.current = rows.length; onLoadMore?.()
     }
@@ -217,6 +236,6 @@ export function DataGrid(props: Props) {
         </div>)}
       </div>
     </div>
-    {detail && <div className="cell-detail" role="dialog" aria-modal="true" aria-label="Cell detail"><header><strong>Cell value</strong><button autoFocus type="button" aria-label="Close detail" onClick={() => { const target = detail.returnFocus; setDetail(null); target.focus() }}>×</button></header><pre>{formatCellValue(detail.value, Number.MAX_SAFE_INTEGER).full}</pre></div>}
+    {detail && <div className="cell-detail" role="dialog" aria-label="Cell detail"><header><strong>Cell value</strong><button autoFocus type="button" aria-label="Close detail" onClick={() => { const target = detail.returnFocus; setDetail(null); target.focus() }}>×</button></header><pre>{formatCellValue(detail.value, Number.MAX_SAFE_INTEGER).full}</pre></div>}
   </section>
 }
