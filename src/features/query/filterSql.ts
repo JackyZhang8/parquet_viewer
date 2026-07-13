@@ -1,5 +1,5 @@
 import type { ColumnSchema, FilterOperator, FilterQueryRequest, SessionFilter, SessionScalar, SessionSort } from '../../domain/types'
-import { sessionDecimal, sessionInteger } from '../../domain/types'
+import { sessionDecimal, sessionInteger, sessionScalarFromNumber } from '../../domain/types'
 
 export type ColumnFamily =
   | { kind: 'boolean' | 'text' | 'temporal' | 'float' | 'binary' | 'nested' | 'unsupported' }
@@ -75,7 +75,7 @@ export const convertEditorValue = (column: ColumnSchema, raw: string): SessionSc
       if (/^(?:0|-[1-9]\d*|[1-9]\d*)$/.test(raw)) return sessionInteger(raw)
       const value = Number(raw)
       if (!Number.isFinite(value)) throw new Error('Float value must be finite')
-      return { type: 'number', value }
+      return sessionScalarFromNumber(value)
     }
     case 'text': case 'temporal': return { type: 'string', value: raw }
     default: throw new Error('This column type only supports null predicates')

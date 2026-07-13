@@ -54,6 +54,22 @@ it('keeps filters isolated when switching ready tabs and introduces no result gr
   expect(screen.getByText(/results arrive in task 9/i)).toBeInTheDocument()
 })
 
+it('does not leak schema search or collapse state between tabs', async () => {
+  const desktop = api()
+  vi.mocked(desktop.loadSession).mockResolvedValue({snapshot:{version:1,activeTabId:'a',tabs:[
+    {id:'a',fileId:'a',path:'/a.parquet',sqlDraft:'',filters:[],sorts:[],viewState:{scrollTop:0,scrollLeft:0,sidebarWidth:260,editorHeight:180}},
+    {id:'b',fileId:'b',path:'/b.parquet',sqlDraft:'',filters:[],sorts:[],viewState:{scrollTop:0,scrollLeft:0,sidebarWidth:260,editorHeight:180}},
+  ]},unavailableTabIds:[],warning:null})
+  vi.mocked(desktop.openFiles).mockImplementation(async (paths) => paths.map((path)=>({ok:true as const,metadata:{fileId:path.slice(1,2),path,name:path.slice(1),sizeBytes:'1',rowCount:'1',rowGroupCount:1,columns:[{name:'alpha',logicalType:'INT64',nullable:false},{name:'beta',logicalType:'INT64',nullable:false}]}})))
+  render(<App api={desktop} />)
+  await userEvent.type(await screen.findByRole('searchbox',{name:/search fields/i}),'zzz')
+  await userEvent.click(screen.getByRole('button',{name:/collapse schema/i}))
+  await userEvent.click(screen.getByRole('tab',{name:/b.parquet/i}))
+  expect(screen.getByRole('searchbox',{name:/search fields/i})).toHaveValue('')
+  await userEvent.click(screen.getByRole('tab',{name:/a.parquet/i}))
+  expect(screen.getByRole('searchbox',{name:/search fields/i})).toHaveValue('')
+})
+
 it('opens picker files from the workspace toolbar', async () => {
   const desktop = api()
   vi.mocked(desktop.pickParquetFiles).mockResolvedValue(['/picked.parquet'])

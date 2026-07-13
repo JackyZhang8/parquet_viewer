@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ColumnSchema, SessionFilter } from '../../domain/types'
+import { isSessionScalar, type ColumnSchema, type SessionFilter } from '../../domain/types'
 import { buildFilterQueryRequest, columnFamily, convertEditorValue, operatorsFor } from './filterSql'
 
 const col = (logicalType: string, name = 'value'): ColumnSchema => ({ name, logicalType, nullable: true })
@@ -39,9 +39,16 @@ describe('convertEditorValue', () => {
     expect(convertEditorValue(col('INT64'), '-9223372036854775808')).toEqual({ type: 'integer', value: '-9223372036854775808' })
     expect(convertEditorValue(col('DECIMAL(20,4)'), '1234567890123456.1234')).toEqual({ type: 'decimal', value: '1234567890123456.1234' })
     expect(convertEditorValue(col('DOUBLE'), '1.25')).toEqual({ type: 'number', value: 1.25 })
+    expect(convertEditorValue(col('DOUBLE'), '1.0')).toEqual({ type: 'integer', value: '1' })
+    expect(convertEditorValue(col('DOUBLE'), '1e3')).toEqual({ type: 'integer', value: '1000' })
+    expect(convertEditorValue(col('DOUBLE'), '-0')).toEqual({ type: 'integer', value: '0' })
     expect(convertEditorValue(col('DOUBLE'), '9007199254740993')).toEqual({ type: 'integer', value: '9007199254740993' })
     expect(convertEditorValue(col('DATE'), '2026-07-12')).toEqual({ type: 'string', value: '2026-07-12' })
     expect(convertEditorValue(col('INT8'), '128')).toEqual({ type: 'integer', value: '128' })
+  })
+
+  it.each(['1.0','1e3','-0','0.5'])('always emits a valid session scalar for float %s', (raw) => {
+    expect(isSessionScalar(convertEditorValue(col('DOUBLE'), raw))).toBe(true)
   })
 
   it.each([

@@ -26,10 +26,39 @@ it('adds typed and null conditions, removes, clears, and runs exact request', as
   const withNull = onFiltersChange.mock.calls.at(-1)![0]
   rerender(<FilterBar columns={columns} filters={withNull} sorts={[]} onFiltersChange={onFiltersChange} onSortsChange={vi.fn()} onRun={onRun} />)
   await userEvent.click(screen.getByRole('button',{name:'Run filters'}))
-  expect(onRun).toHaveBeenCalledWith({selectedColumns:[],filters:[{column:'active',operator:'eq',value:{type:'boolean',value:true}},{column:'name',operator:'isNull'}],sorts:[],previewLimit:1000})
+  expect(onRun).toHaveBeenCalledWith({selectedColumns:[],filters:[{column:'active',operator:'eq',value:{type:'boolean',value:true}},{column:'name',operator:'isNull'}],sorts:[],previewLimit:10000})
   await userEvent.click(screen.getByRole('button',{name:/remove active/i}))
   await userEvent.click(screen.getByRole('button',{name:'Clear filters'}))
   expect(onFiltersChange).toHaveBeenLastCalledWith([])
+})
+
+it('initializes null-only columns safely and reacts to column replacement', () => {
+  const props = { filters:[], sorts:[], onFiltersChange:vi.fn(), onSortsChange:vi.fn(), onRun:vi.fn() }
+  const { rerender } = render(<FilterBar columns={[{name:'blob',logicalType:'BINARY',nullable:true}]} {...props} />)
+  expect(screen.getByLabelText('Filter operator')).toHaveValue('isNull')
+  expect(screen.queryByLabelText('Filter value')).not.toBeInTheDocument()
+  rerender(<FilterBar columns={[{name:'flag',logicalType:'BOOLEAN',nullable:true}]} {...props} />)
+  expect(screen.getByLabelText('Filter column')).toHaveValue('flag')
+  expect(screen.getByLabelText('Filter operator')).toHaveValue('eq')
+  expect(screen.getByLabelText('Filter value')).toBeInTheDocument()
+})
+
+it('shows scalar values and restores focus after removal and clear', async () => {
+  const filters = [{column:'id',operator:'eq' as const,value:{type:'integer' as const,value:'42'}},{column:'name',operator:'isNull' as const,value:{type:'null' as const}}]
+  const onFiltersChange = vi.fn()
+  render(<FilterBar columns={columns} filters={filters} sorts={[]} onFiltersChange={onFiltersChange} onSortsChange={vi.fn()} onRun={vi.fn()} />)
+  expect(screen.getByText(/id equals 42/i)).toBeInTheDocument()
+  expect(screen.getByText(/name is null NULL/i)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button',{name:/remove id/i}))
+  expect(screen.getByRole('button',{name:'Add condition'})).toHaveFocus()
+  await userEvent.click(screen.getByRole('button',{name:'Clear filters'}))
+  expect(screen.getByRole('button',{name:'Add condition'})).toHaveFocus()
+})
+
+it('restores add-sort focus after removing a sort', async () => {
+  render(<FilterBar columns={columns} filters={[]} sorts={[{column:'id',direction:'asc'}]} onFiltersChange={vi.fn()} onSortsChange={vi.fn()} onRun={vi.fn()} />)
+  await userEvent.click(screen.getByRole('button',{name:/remove id sort/i}))
+  expect(screen.getByRole('button',{name:'Add sort'})).toHaveFocus()
 })
 
 it('shows inline integer and decimal validation and changes operator options', async () => {

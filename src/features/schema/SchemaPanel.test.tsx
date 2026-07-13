@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import { fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
 import { SchemaPanel } from './SchemaPanel'
@@ -33,8 +34,25 @@ it('copies a field and catches clipboard failure', async () => {
   const onError = vi.fn()
   Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
   render(<SchemaPanel metadata={metadata} width={260} onWidthChange={vi.fn()} onError={onError} />)
-  await userEvent.click(screen.getByRole('button', {name:/copy event_id/i}))
+  await userEvent.click(screen.getByRole('button', {name:/copy field event_id, UINT64, required/i}))
   expect(onError).toHaveBeenCalled()
+})
+
+it('announces successful copy and exposes field details in the accessible name', async () => {
+  Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+  render(<SchemaPanel metadata={metadata} width={260} onWidthChange={vi.fn()} onError={vi.fn()} />)
+  await userEvent.click(screen.getByRole('button', {name:/copy field created_at, TIMESTAMP_MICROS, nullable/i}))
+  expect(screen.getByRole('status')).toHaveTextContent(/copied created_at/i)
+})
+
+it('windows 5000 fields while search still reaches the full schema', async () => {
+  const columns = Array.from({length:5000},(_,index)=>({name:`field_${index}`,logicalType:'INT64',nullable:false}))
+  const { container } = render(<SchemaPanel metadata={{...metadata,columns}} width={260} onWidthChange={vi.fn()} onError={vi.fn()} />)
+  expect(container.querySelectorAll('.schema-field').length).toBeLessThan(30)
+  fireEvent.scroll(screen.getByRole('list',{name:/schema fields/i}), {target:{scrollTop:4800}})
+  expect(container.querySelectorAll('.schema-field').length).toBeLessThan(30)
+  await userEvent.type(screen.getByRole('searchbox',{name:/search fields/i}), 'field_4999')
+  expect(screen.getByText('field_4999')).toBeInTheDocument()
 })
 
 it('has accessible loading, unavailable, error, empty, and collapse states', async () => {
@@ -47,5 +65,5 @@ it('has accessible loading, unavailable, error, empty, and collapse states', asy
   rerender(<SchemaPanel metadata={{...metadata,columns:[]}} width={260} onWidthChange={vi.fn()} onError={vi.fn()} />)
   expect(screen.getByText(/no columns/i)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', {name:/collapse schema/i}))
-  expect(screen.getByRole('button', {name:/expand schema/i})).toBeInTheDocument()
+  expect(screen.getByRole('button', {name:/expand schema/i})).toHaveFocus()
 })
