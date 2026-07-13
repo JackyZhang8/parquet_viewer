@@ -15,6 +15,12 @@ pub enum AppError {
     StaleFile(String),
     #[error("{0}")]
     Sql(String),
+    #[error("{message}")]
+    SqlLocated {
+        message: String,
+        line: u64,
+        column: u64,
+    },
     #[error("{0}")]
     Cancelled(String),
     #[error("{0}")]
@@ -31,7 +37,7 @@ impl AppError {
             Self::PermissionDenied(_) => "PERMISSION_DENIED",
             Self::InvalidParquet(_) => "INVALID_PARQUET",
             Self::StaleFile(_) => "STALE_FILE",
-            Self::Sql(_) => "SQL_ERROR",
+            Self::Sql(_) | Self::SqlLocated { .. } => "SQL_ERROR",
             Self::Cancelled(_) => "CANCELLED",
             Self::ResourceExhausted(_) => "RESOURCE_EXHAUSTED",
             Self::Internal(_) => "INTERNAL_ERROR",
@@ -48,7 +54,26 @@ impl AppError {
             | Self::Sql(message)
             | Self::Cancelled(message)
             | Self::ResourceExhausted(message) => message,
+            Self::SqlLocated { message, .. } => message,
             Self::Internal(_) => "An internal error occurred",
+        }
+    }
+
+    fn detail(&self) -> Option<String> {
+        match self {
+            Self::SqlLocated { line, column, .. } => Some(format!("line {line} column {column}")),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn sql_with_source(message: impl Into<String>, source: &str) -> Self {
+        match sql_location_from_message(source) {
+            Some((line, column)) => Self::SqlLocated {
+                message: message.into(),
+                line,
+                column,
+            },
+            None => Self::Sql(message.into()),
         }
     }
 }
@@ -61,14 +86,74 @@ impl Serialize for AppError {
         let mut state = serializer.serialize_struct("AppError", 3)?;
         state.serialize_field("code", self.code())?;
         state.serialize_field("message", self.message())?;
-        state.serialize_field("detail", &Option::<String>::None)?;
+        state.serialize_field("detail", &self.detail())?;
         state.end()
     }
 }
 
+fn number_after_label(text: &str, label: &str, from: usize) -> Option<(u64, usize)> {
+    let label_at = text[from..].find(label)? + from;
+    let mut at = label_at + label.len();
+    let bytes = text.as_bytes();
+    while at < bytes.len() && !bytes[at].is_ascii_digit() {
+        if at > label_at + label.len() + 8 {
+            return None;
+        }
+        at += 1
+    }
+    let start = at;
+    while at < bytes.len() && bytes[at].is_ascii_digit() {
+        at += 1
+    }
+    if start == at {
+        return None;
+    }
+    Some((text[start..at].parse().ok()?, at))
+}
+
+pub(crate) fn sql_location_from_message(message: &str) -> Option<(u64, u64)> {
+    let lower = message.to_ascii_lowercase();
+    let mut search = 0;
+    while let Some((line, after_line)) = number_after_label(&lower, "line", search) {
+        if let Some((column, _)) = number_after_label(&lower, "column", after_line)
+            && line > 0
+            && column > 0
+        {
+            return Some((line, column));
+        }
+        search = after_line
+    }
+
+    let lines = message.lines().collect::<Vec<_>>();
+    for (index, source_line) in lines.iter().enumerate() {
+        let lower_line = source_line.to_ascii_lowercase();
+        let trimmed_at = source_line.len() - source_line.trim_start().len();
+        let trimmed = &lower_line[trimmed_at..];
+        if !trimmed.starts_with("line ") {
+            continue;
+        }
+        let colon = source_line.find(':')?;
+        let line = source_line[trimmed_at + 5..colon]
+            .trim()
+            .parse::<u64>()
+            .ok()?;
+        let query_start = source_line[colon + 1..]
+            .find(|character: char| !character.is_whitespace())?
+            + colon
+            + 1;
+        let caret_line = lines.get(index + 1).or_else(|| lines.get(index + 2))?;
+        let caret = caret_line.find('^')?;
+        let column = caret.saturating_sub(query_start) as u64 + 1;
+        if line > 0 && column > 0 {
+            return Some((line, column));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AppError;
+    use super::{AppError, sql_location_from_message};
     use serde_json::json;
 
     #[test]
@@ -145,6 +230,44 @@ mod tests {
                 "message": "Invalid filter value",
                 "detail": null
             })
+        );
+    }
+
+    #[test]
+    fn located_sql_error_serializes_only_a_safe_location() {
+        let error = AppError::SqlLocated {
+            message: "The query has invalid SQL syntax".into(),
+            line: 12,
+            column: 7,
+        };
+
+        let wire = serde_json::to_value(error).unwrap();
+        assert_eq!(
+            wire,
+            json!({
+                "code": "SQL_ERROR",
+                "message": "The query has invalid SQL syntax",
+                "detail": "line 12 column 7"
+            })
+        );
+        assert!(!wire.to_string().contains("private.parquet"));
+    }
+
+    #[test]
+    fn extracts_direct_and_duckdb_caret_locations_without_retaining_source_text() {
+        assert_eq!(
+            sql_location_from_message("parser error at Line: 3, Column: 9 near /secret"),
+            Some((3, 9))
+        );
+        assert_eq!(
+            sql_location_from_message(
+                "Parser Error: bad\nLINE 2: SELECT secret FROM payroll\n                       ^\n/private.parquet"
+            ),
+            Some((2, 16))
+        );
+        assert_eq!(
+            sql_location_from_message("Binder Error: missing column"),
+            None
         );
     }
 }

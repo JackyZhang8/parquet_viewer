@@ -1,6 +1,7 @@
 import type { ColumnSchema } from '../../domain/types'
 
 export type SqlSuggestionKind = 'field' | 'table' | 'keyword' | 'function'
+export type SqlFieldType = 'boolean' | 'numeric' | 'text' | 'temporal' | 'binary' | 'nested' | 'unknown'
 
 export interface SqlSuggestion {
   label: string
@@ -9,6 +10,18 @@ export interface SqlSuggestion {
   detail: string
   sortText: string
   insertTextRules?: 'snippet'
+  fieldType?: SqlFieldType
+}
+
+export const sqlFieldType = (logicalType: string): SqlFieldType => {
+  const type = logicalType.toLowerCase()
+  if (/bool/.test(type)) return 'boolean'
+  if (/(?:struct|list|map|array|union)/.test(type)) return 'nested'
+  if (/(?:u?int|hugeint|decimal|numeric|float|double|real)/.test(type)) return 'numeric'
+  if (/(?:date|time|timestamp|interval)/.test(type)) return 'temporal'
+  if (/(?:blob|binary|byte)/.test(type)) return 'binary'
+  if (/(?:char|text|string|utf8|json|uuid)/.test(type)) return 'text'
+  return 'unknown'
 }
 
 const KEYWORDS = [
@@ -78,6 +91,7 @@ export const getSqlCompletions = (sql: string, cursorOffset: number, columns: Co
   columns.forEach((column) => raw.push({
     label: column.name, kind: 'field', insertText: quoteSqlIdentifier(column.name),
     detail: `${column.logicalType}${column.nullable ? ' · nullable' : ' · not null'}`,
+    fieldType: sqlFieldType(column.logicalType),
     priority: mode === 'field' ? 0 : mode === 'table' ? 3 : 1, order: raw.length,
   }))
   raw.push({ label: 'data', kind: 'table', insertText: 'data', detail: 'Current Parquet file', priority: mode === 'table' ? 0 : 1, order: raw.length })

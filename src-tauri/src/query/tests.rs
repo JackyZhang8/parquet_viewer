@@ -261,16 +261,47 @@ fn syntax_error_leaves_no_cursor() {
 }
 
 #[test]
+fn syntax_error_serializes_a_safe_location_without_sql_or_engine_text() {
+    let (_directory, registry, file_id) = registered_fixture(2);
+    let service = QueryService::default();
+    let error = service
+        .start_query(request(file_id, "SELECT 1 IS a", 3, 100), &registry)
+        .unwrap_err();
+    let wire = serde_json::to_value(error).unwrap();
+    assert_eq!(wire["code"], "SQL_ERROR");
+    assert_eq!(wire["message"], "The query has invalid SQL syntax");
+    assert!(wire["detail"].as_str().unwrap().starts_with("line "));
+    let serialized = wire.to_string();
+    assert!(!serialized.contains("SELECT 1"));
+    assert!(!serialized.contains("sql parser"));
+    assert!(!serialized.contains("parquet"));
+}
+
+#[test]
 fn duckdb_preparation_error_leaves_no_cursor() {
     let (_directory, registry, file_id) = registered_fixture(2);
     let service = QueryService::default();
-    assert!(matches!(
-        service.start_query(
+    let error = service
+        .start_query(
             request(file_id, "SELECT missing_column FROM data", 3, 100),
             &registry,
-        ),
-        Err(crate::error::AppError::Sql(_))
+        )
+        .unwrap_err();
+    assert!(matches!(
+        &error,
+        crate::error::AppError::Sql(_) | crate::error::AppError::SqlLocated { .. }
     ));
+    let wire = serde_json::to_value(error).unwrap();
+    assert_eq!(
+        wire["message"],
+        "The query could not be prepared or executed"
+    );
+    assert!(
+        wire["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with("line "))
+    );
+    assert!(!wire.to_string().contains("missing_column"));
     assert_eq!(service.active_cursor_count(), 0);
 }
 

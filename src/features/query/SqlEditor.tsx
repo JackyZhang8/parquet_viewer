@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { editor, languages, Position } from 'monaco-editor'
 import type { AppError, ColumnSchema } from '../../domain/types'
 import { getSqlCompletions } from './sqlCompletion'
+import { formatSql } from './sqlFormatting'
 
 interface Props {
   tabId: string
@@ -28,13 +29,55 @@ export interface SqlErrorMarker {
 }
 
 export const parseSqlErrorMarker = (error: AppError): SqlErrorMarker => {
-  const text = `${error.message}${error.detail ? ` ${error.detail}` : ''}`
-  const match = text.match(/\bline\s+(\d+)\s*[,;:]?\s*(?:column|col)\s+(\d+)/i) ??
-    text.match(/\bline\s+(\d+)\s*:\s*(\d+)/i) ?? text.match(/\b(\d+)\s*:\s*(\d+)\b/)
+  const match = error.detail?.match(/^line ([1-9]\d*) column ([1-9]\d*)$/)
   const lineNumber = Math.max(1, Number(match?.[1] ?? 1) || 1)
   const column = Math.max(1, Number(match?.[2] ?? 1) || 1)
   const message = error.message.replace(/[\r\n\t\0-\x1f\x7f]+/g, ' ').trim().slice(0, 1000) || 'SQL query failed'
   return { lineNumber, column, message }
+}
+
+export const columnNameAtPosition = (line: string, column: number): string | null => {
+  const cursor = Math.max(0, Math.min(line.length, column - 1))
+  for (let index = 0; index < line.length;) {
+    if (line[index] === '-' && line[index + 1] === '-') {
+      if (cursor >= index) return null
+      break
+    }
+    if (line[index] === '/' && line[index + 1] === '*') {
+      const close = line.indexOf('*/', index + 2); const end = close < 0 ? line.length : close + 2
+      if (cursor >= index && cursor < end) return null
+      index = end; continue
+    }
+    if (line[index] === "'") {
+      const start = index; index += 1
+      while (index < line.length) {
+        if (line[index] === "'" && line[index + 1] === "'") { index += 2; continue }
+        if (line[index] === "'") { index += 1; break }
+        index += 1
+      }
+      if (cursor >= start && cursor < index) return null
+      continue
+    }
+    if (line[index] === '"') {
+      const start = index; let name = ''; index += 1
+      while (index < line.length) {
+        if (line[index] === '"' && line[index + 1] === '"') { name += '"'; index += 2; continue }
+        if (line[index] === '"') {
+          if (cursor >= start && cursor <= index) return name
+          index += 1; break
+        }
+        name += line[index]; index += 1
+      }
+      if (cursor >= start && cursor <= index) return name
+      continue
+    }
+    index += 1
+  }
+  let start = cursor; let end = cursor
+  while (start > 0 && /[A-Za-z0-9_]/.test(line[start - 1])) start -= 1
+  while (end < line.length && /[A-Za-z0-9_]/.test(line[end])) end += 1
+  const word = line.slice(start, end)
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(word) ? word : null
 }
 
 export function SqlEditor({ tabId, fileId, value, columns, height, error, onChange, onRun, onHeightChange }: Props) {
@@ -42,6 +85,7 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null)
   const disposablesRef = useRef<Array<{ dispose(): void }>>([])
+  const resizeCleanupRef = useRef<(() => void) | null>(null)
   const columnsRef = useRef(columns); columnsRef.current = columns
   const valueRef = useRef(value); valueRef.current = value
   const onRunRef = useRef(onRun); onRunRef.current = onRun
@@ -72,8 +116,17 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
           field: monaco.languages.CompletionItemKind.Field, table: monaco.languages.CompletionItemKind.Module,
           keyword: monaco.languages.CompletionItemKind.Keyword, function: monaco.languages.CompletionItemKind.Function,
         }
+        const fieldKinds: Record<string, languages.CompletionItemKind> = {
+          boolean: monaco.languages.CompletionItemKind.EnumMember,
+          numeric: monaco.languages.CompletionItemKind.Value,
+          text: monaco.languages.CompletionItemKind.Text,
+          temporal: monaco.languages.CompletionItemKind.Event,
+          binary: monaco.languages.CompletionItemKind.File,
+          nested: monaco.languages.CompletionItemKind.Struct,
+          unknown: monaco.languages.CompletionItemKind.Field,
+        }
         return { suggestions: getSqlCompletions(valueRef.current, offset, columnsRef.current).map((item) => ({
-          label: item.label, kind: kinds[item.kind], insertText: item.insertText, detail: item.detail,
+          label: item.label, kind: item.kind === 'field' ? fieldKinds[item.fieldType ?? 'unknown'] : kinds[item.kind], insertText: item.insertText, detail: item.detail,
           sortText: item.sortText, range,
           ...(item.insertTextRules ? { insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet } : {}),
         })) }
@@ -82,18 +135,25 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
     const hover = monaco.languages.registerHoverProvider('sql', {
       provideHover(model: editor.ITextModel, position: Position) {
         if (model.uri.toString() !== uri) return null
-        const word = model.getWordAtPosition(position)?.word
-        const column = columnsRef.current.find((item) => item.name === word)
+        const name = columnNameAtPosition(model.getLineContent(position.lineNumber), position.column) ?? model.getWordAtPosition(position)?.word
+        const column = columnsRef.current.find((item) => item.name === name)
         return column ? { contents: [{ value: `**${column.name}** — \`${column.logicalType}\` · ${column.nullable ? 'nullable' : 'not null'}` }] } : null
       },
     })
-    disposablesRef.current = [completion, hover]
+    const formatting = monaco.languages.registerDocumentFormattingEditProvider('sql', {
+      provideDocumentFormattingEdits(model: editor.ITextModel) {
+        if (model.uri.toString() !== uri) return []
+        return [{ range: model.getFullModelRange(), text: formatSql(model.getValue()) }]
+      },
+    })
+    disposablesRef.current = [completion, hover, formatting]
     instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run)
     instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, format)
     setMounted((count) => count + 1)
   }
 
   useEffect(() => () => {
+    resizeCleanupRef.current?.()
     disposablesRef.current.splice(0).forEach((disposable) => disposable.dispose())
     editorRef.current?.getModel()?.dispose()
     editorRef.current = null; monacoRef.current = null
@@ -113,10 +173,18 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
+    resizeCleanupRef.current?.()
     const startY = event.clientY; const startHeight = clampHeight(height)
     const move = (moveEvent: PointerEvent) => onHeightChange(clampHeight(startHeight + moveEvent.clientY - startY))
-    const stop = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', stop) }
-    document.addEventListener('pointermove', move); document.addEventListener('pointerup', stop, { once: true })
+    let active = true
+    const stop = () => {
+      if (!active) return
+      active = false
+      document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', stop); document.removeEventListener('pointercancel', stop)
+      if (resizeCleanupRef.current === stop) resizeCleanupRef.current = null
+    }
+    resizeCleanupRef.current = stop
+    document.addEventListener('pointermove', move); document.addEventListener('pointerup', stop); document.addEventListener('pointercancel', stop)
   }
   const resizeKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
     let next: number | undefined

@@ -49,4 +49,18 @@ describe('SQL completion', () => {
     expect(getSqlCompletions('SELECT ', 7, [{ name: 'inactive_only', logicalType: 'BOOLEAN', nullable: true }])[0].label)
       .toBe('inactive_only')
   })
+
+  it('classifies field type families for differentiated completion icons', () => {
+    const typed: ColumnSchema[] = [
+      { name: 'flag', logicalType: 'BOOLEAN', nullable: false },
+      { name: 'amount', logicalType: 'DECIMAL(18,2)', nullable: false },
+      { name: 'name', logicalType: 'VARCHAR', nullable: true },
+      { name: 'created', logicalType: 'TIMESTAMP', nullable: false },
+      { name: 'payload', logicalType: 'BLOB', nullable: true },
+      { name: 'attrs', logicalType: 'STRUCT(a INTEGER)', nullable: true },
+    ]
+    const suggestions = getSqlCompletions('SELECT ', 7, typed)
+    expect(typed.map((column) => suggestions.find((item) => item.label === column.name)?.fieldType))
+      .toEqual(['boolean', 'numeric', 'text', 'temporal', 'binary', 'nested'])
+  })
 })

@@ -44,8 +44,9 @@ pub(super) const DENIED_EXTERNAL_FUNCTIONS: &[&str] = &[
 ];
 
 pub(super) fn validate_user_sql(sql: &str) -> Result<String, AppError> {
-    let statements = Parser::parse_sql(&DuckDbDialect {}, sql)
-        .map_err(|_| AppError::Sql("The query has invalid SQL syntax".into()))?;
+    let statements = Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|error| {
+        AppError::sql_with_source("The query has invalid SQL syntax", &error.to_string())
+    })?;
     let [Statement::Query(query)] = statements.as_slice() else {
         return Err(AppError::Sql(
             "Exactly one read-only SELECT or WITH query is required".into(),

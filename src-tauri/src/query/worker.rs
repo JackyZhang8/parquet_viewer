@@ -340,15 +340,16 @@ fn quote_sql_string(path: &Path) -> Result<String, AppError> {
 }
 
 fn safe_sql_error(error: duckdb::Error) -> AppError {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("out of memory")
-        || message.contains("memory limit")
-        || message.contains("temp_directory")
-        || message.contains("maximum temp")
+    let source = error.to_string();
+    let lower = source.to_ascii_lowercase();
+    if lower.contains("out of memory")
+        || lower.contains("memory limit")
+        || lower.contains("temp_directory")
+        || lower.contains("maximum temp")
     {
         AppError::ResourceExhausted("The query exceeded its resource limit".into())
     } else {
-        AppError::Sql("The query could not be prepared or executed".into())
+        AppError::sql_with_source("The query could not be prepared or executed", &source)
     }
 }
 
