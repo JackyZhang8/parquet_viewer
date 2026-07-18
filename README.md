@@ -12,8 +12,12 @@
   <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-4CAF50" alt="macOS, Windows and Linux" />
 </p>
 
+<p align="center">
+  <img src="screenshots/screenshot-1.png" alt="Parquet Viewer 主界面预览" width="1200" />
+</p>
+
 > [!NOTE]
-> 项目当前处于 `0.1.0` 的早期阶段。欢迎试用和反馈；正式公开发布前请先补充 [开源协议](#开源协议license)。
+> 项目当前处于 `0.1.0` 的早期阶段。欢迎试用和反馈，也欢迎参与共建。
 
 ## 为什么做这个工具？
 
@@ -164,9 +168,7 @@ npm run build
 
 ## 开源协议（License）
 
-当前仓库尚未包含 `LICENSE` 文件。没有明确许可证时，他人默认不具备复制、修改或分发代码的授权。
-
-在正式开源发布前，请维护者选择并添加许可证（常见选择包括 MIT、Apache-2.0 或 GPL-3.0），再将本节替换为对应许可证链接。
+本项目采用 [Apache License 2.0](LICENSE) 开源。
 
 ---
 

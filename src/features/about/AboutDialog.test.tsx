@@ -20,3 +20,15 @@ it('uses the corresponding Chinese product introduction', () => {
   expect(screen.getByRole('heading', { name: '让 Parquet 数据，一目了然。' })).toBeInTheDocument()
   expect(screen.getByText('无需上传或迁移数据，即可浏览结构、查看记录并完成定向查询。')).toBeInTheDocument()
 })
+
+it('shows the open-source repository, license, and author', () => {
+  render(<AboutDialog language="zh" onClose={() => undefined} />)
+
+  expect(screen.getByText('开源地址')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'https://github.com/JackyZhang8/parquet_viewer' }))
+    .toHaveAttribute('href', 'https://github.com/JackyZhang8/parquet_viewer')
+  expect(screen.getByText('开源协议')).toBeInTheDocument()
+  expect(screen.getByText('Apache License 2.0')).toBeInTheDocument()
+  expect(screen.getByText('作者')).toBeInTheDocument()
+  expect(screen.getByText('JackyZhang8')).toBeInTheDocument()
+})
