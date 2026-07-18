@@ -16,6 +16,7 @@ use crate::error::AppError;
 use crate::models::CellValue;
 
 pub(super) const MAX_CELL_ENCODED_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_CELL_NESTING_DEPTH: usize = 16;
 
 pub(super) struct ConvertedCell {
     pub value: CellValue,
@@ -75,6 +76,14 @@ pub(super) fn cell_from_value(value: Value) -> CellValue {
 }
 
 pub(super) fn cell_from_array(array: &dyn Array, row: usize) -> Result<ConvertedCell, AppError> {
+    cell_from_array_at_depth(array, row, 0)
+}
+
+fn cell_from_array_at_depth(
+    array: &dyn Array,
+    row: usize,
+    depth: usize,
+) -> Result<ConvertedCell, AppError> {
     if array.is_null(row) {
         return converted(CellValue::Null, 4);
     }
@@ -146,41 +155,46 @@ pub(super) fn cell_from_array(array: &dyn Array, row: usize) -> Result<Converted
             );
         }
         DataType::List(_) => {
+            ensure_nesting_depth(depth)?;
             let values = array
                 .as_any()
                 .downcast_ref::<ListArray>()
                 .unwrap()
                 .value(row);
-            return array_cell(values.as_ref());
+            return array_cell(values.as_ref(), depth + 1);
         }
         DataType::LargeList(_) => {
+            ensure_nesting_depth(depth)?;
             let values = array
                 .as_any()
                 .downcast_ref::<LargeListArray>()
                 .unwrap()
                 .value(row);
-            return array_cell(values.as_ref());
+            return array_cell(values.as_ref(), depth + 1);
         }
         DataType::FixedSizeList(_, _) => {
+            ensure_nesting_depth(depth)?;
             let values = array
                 .as_any()
                 .downcast_ref::<FixedSizeListArray>()
                 .unwrap()
                 .value(row);
-            return array_cell(values.as_ref());
+            return array_cell(values.as_ref(), depth + 1);
         }
         DataType::Struct(_) => {
+            ensure_nesting_depth(depth)?;
             let values = array.as_any().downcast_ref::<StructArray>().unwrap();
             let mut object = BTreeMap::new();
             let mut size = 2;
             for (field, column) in values.fields().iter().zip(values.columns()) {
-                let cell = cell_from_array(column.as_ref(), row)?;
+                let cell = cell_from_array_at_depth(column.as_ref(), row, depth + 1)?;
                 size = object_entry_encoded_size(size, field.name(), &cell, !object.is_empty())?;
                 object.insert(field.name().clone(), cell.value);
             }
             return converted(CellValue::Object(object), size);
         }
         DataType::Map(_, _) => {
+            ensure_nesting_depth(depth)?;
             let entries = array
                 .as_any()
                 .downcast_ref::<MapArray>()
@@ -188,8 +202,8 @@ pub(super) fn cell_from_array(array: &dyn Array, row: usize) -> Result<Converted
                 .value(row);
             return collect_map_cells((0..entries.len()).map(|index| {
                 Ok((
-                    cell_from_array(entries.column(0).as_ref(), index)?,
-                    cell_from_array(entries.column(1).as_ref(), index)?,
+                    cell_from_array_at_depth(entries.column(0).as_ref(), index, depth + 1)?,
+                    cell_from_array_at_depth(entries.column(1).as_ref(), index, depth + 1)?,
                 ))
             }));
         }
@@ -205,8 +219,17 @@ pub(super) fn cell_from_array(array: &dyn Array, row: usize) -> Result<Converted
     converted(value, size)
 }
 
-fn array_cell(values: &dyn Array) -> Result<ConvertedCell, AppError> {
-    collect_array_cells((0..values.len()).map(|index| cell_from_array(values, index)))
+fn array_cell(values: &dyn Array, depth: usize) -> Result<ConvertedCell, AppError> {
+    collect_array_cells(
+        (0..values.len()).map(|index| cell_from_array_at_depth(values, index, depth)),
+    )
+}
+
+fn ensure_nesting_depth(depth: usize) -> Result<(), AppError> {
+    if depth >= MAX_CELL_NESTING_DEPTH {
+        return Err(resource_exhausted());
+    }
+    Ok(())
 }
 
 fn collect_array_cells<I>(cells: I) -> Result<ConvertedCell, AppError>
@@ -325,12 +348,15 @@ fn resource_exhausted() -> AppError {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::Arc;
 
     use super::{
-        ConvertedCell, MAX_CELL_ENCODED_BYTES, collect_array_cells, collect_map_cells,
-        object_entry_encoded_size,
+        ConvertedCell, MAX_CELL_ENCODED_BYTES, MAX_CELL_NESTING_DEPTH, cell_from_array,
+        collect_array_cells, collect_map_cells, object_entry_encoded_size,
     };
     use crate::models::CellValue;
+    use duckdb::arrow::array::{Array, FixedSizeListArray, Int32Array};
+    use duckdb::arrow::datatypes::Field;
 
     fn null_cell() -> ConvertedCell {
         ConvertedCell {
@@ -370,5 +396,16 @@ mod tests {
         let key = "\"\\\n".repeat(MAX_CELL_ENCODED_BYTES / 4);
         assert!(key.len() < MAX_CELL_ENCODED_BYTES);
         assert!(object_entry_encoded_size(2, &key, &null_cell(), false).is_err());
+    }
+
+    #[test]
+    fn deeply_nested_arrow_values_are_rejected_before_recursive_conversion() {
+        let mut array: Arc<dyn Array> = Arc::new(Int32Array::from(vec![1]));
+        for _ in 0..=MAX_CELL_NESTING_DEPTH {
+            let field = Arc::new(Field::new_list_field(array.data_type().clone(), true));
+            array = Arc::new(FixedSizeListArray::new(field, 1, array, None));
+        }
+
+        assert!(cell_from_array(array.as_ref(), 0).is_err());
     }
 }

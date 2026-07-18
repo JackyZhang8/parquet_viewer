@@ -39,6 +39,7 @@ export interface WorkspaceState {
   closeTab(id: string): Promise<void>
   closeOthers(id: string): Promise<void>
   closeRight(id: string): Promise<void>
+  reloadTab(id: string): Promise<void>
   reorderTabs(from: number, to: number): void
   setSqlDraft(id: string, sqlDraft: string): void
   setFilters(id: string, filters: SessionFilter[]): void
@@ -85,11 +86,19 @@ export const createWorkspaceStore = (
     code: 'INTERNAL_ERROR', message: 'An internal error occurred', detail: null,
   }
 
+  const clearError = (key: string) => {
+    const pathErrors = store.getState().pathErrors
+    if (!(key in pathErrors)) return
+    const next = { ...pathErrors }
+    delete next[key]
+    store.setState({ pathErrors: next })
+  }
+
   const saveNow = async () => {
     if (disposed || store.getState().hydrationState !== 'ready') return
     if (saveTimer) clearTimeout(saveTimer)
     saveTimer = undefined
-    try { await api.saveSession(snapshot(store.getState())) } catch (error) { store.getState().reportError('Session save', error) }
+    try { await api.saveSession(snapshot(store.getState())); clearError('Session save') } catch (error) { store.getState().reportError('Session save', error) }
   }
   const scheduleSave = () => {
     if (disposed || store.getState().hydrationState !== 'ready') return
@@ -289,6 +298,21 @@ export const createWorkspaceStore = (
     closeTab: (id) => closeIds(new Set([id])),
     closeOthers: (id) => closeIds(new Set(get().tabs.filter((tab) => tab.id !== id).map((tab) => tab.id))),
     closeRight: (id) => { const index = get().tabs.findIndex((tab) => tab.id === id); return closeIds(new Set(get().tabs.slice(index + 1).map((tab) => tab.id))) },
+    async reloadTab(id) {
+      const tab = get().tabs.find((item) => item.id === id)
+      if (!tab || tab.status !== 'ready') return
+      await api.cancelFileQueries(tab.fileId)
+      const metadata = await api.reloadFile(tab.fileId)
+      const current = get()
+      if (!current.tabs.some((item) => item.id === id)) return
+      const queriesByTab = { ...current.queriesByTab }
+      delete queriesByTab[id]; queryLimits.delete(id)
+      set({
+        tabs: current.tabs.map((item) => item.id === id ? { ...item, metadata, path: metadata.path, status: 'ready', error: undefined } : item),
+        queriesByTab,
+      })
+      scheduleSave()
+    },
     reorderTabs(from, to) { const tabs = [...get().tabs]; if (from < 0 || to < 0 || from >= tabs.length || to >= tabs.length) return; const [tab] = tabs.splice(from, 1); tabs.splice(to, 0, tab); updateTabs(tabs) },
     setSqlDraft(id, sqlDraft) { updateTabs(get().tabs.map((tab) => tab.id === id ? { ...tab, sqlDraft } : tab)) },
     setFilters(id, filters) { updateTabs(get().tabs.map((tab) => tab.id === id ? { ...tab, filters } : tab)) },
@@ -356,6 +380,10 @@ export const createWorkspaceStore = (
         ...query, status: 'cancelled', done: true, loadingBatch: false, generation: query.generation + 1,
       } } }))
       if (query.queryId) { try { await api.cancelQuery(query.queryId) } catch { /* best effort */ } }
+      else if (query.status === 'queued') {
+        const tab = get().tabs.find((item) => item.id === tabId)
+        if (tab?.status === 'ready') { try { await api.cancelFileQueries(tab.fileId) } catch { /* best effort */ } }
+      }
     },
     flushSave: saveNow,
     dispose() { disposed = true; if (saveTimer) clearTimeout(saveTimer); saveTimer = undefined },

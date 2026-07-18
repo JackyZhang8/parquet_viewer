@@ -205,6 +205,21 @@ pub enum ExportSource {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportInspectionRequest {
+    pub file_id: String,
+    pub source: ExportSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportInspection {
+    #[serde(with = "u64_decimal")]
+    pub estimated_rows: u64,
+    pub requires_confirmation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportRequest {
     pub file_id: String,
     pub destination: String,

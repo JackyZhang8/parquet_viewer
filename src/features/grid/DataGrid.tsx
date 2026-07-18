@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer, type Rect, type Virtualizer } from '@tanstack/react-virtual'
-import type { CellValue, ColumnSchema } from '../../domain/types'
+import { labelsFor } from '../../app/labels'
+import type { AppLanguage, CellValue, ColumnSchema } from '../../domain/types'
 import type { QueryStatus } from '../../stores/queryState'
 import { formatCellValue, formatTsvValue } from './valueFormat'
 
 interface Point { row: number; column: number }
 interface Detail { value: CellValue; returnFocus: HTMLElement }
+interface ContextMenu { x: number; y: number; source: 'cell' | 'header' }
 interface Props {
   queryKey: string
   columns: ColumnSchema[]
@@ -16,8 +18,12 @@ interface Props {
   initialScroll?: { top: number; left: number }
   onScrollChange?: (scroll: { top: number; left: number }) => void
   onLoadMore?: () => void
+  onRefresh?: () => void
   onVisibleRangeChange?: (range: [number, number] | null) => void
   onCopyStatus?: (message: string, ok: boolean) => void
+  hiddenColumnNames?: ReadonlySet<string>
+  onHiddenColumnNamesChange?(next: Set<string>): void
+  language?: AppLanguage
 }
 
 const ROW_HEIGHT = 30
@@ -45,17 +51,18 @@ const observeOffset = (instance: Virtualizer<HTMLDivElement, Element>, callback:
 }
 
 export function DataGrid(props: Props) {
-  const { queryKey, columns, rows, status, done, loading, onLoadMore, onVisibleRangeChange, onCopyStatus } = props
+  const { queryKey, columns, rows, status, done, loading, onLoadMore, onVisibleRangeChange, onCopyStatus, hiddenColumnNames, onHiddenColumnNamesChange, language = 'en' } = props
+  const copyLabels = labelsFor(language)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null)
   const lastLoadSize = useRef<number | null>(null)
-  const [hidden, setHidden] = useState<Set<number>>(() => new Set())
+  const [localHidden, setLocalHidden] = useState<Set<number>>(() => new Set())
   const [widths, setWidths] = useState(() => columns.map(defaultWidth))
-  const [menuOpen, setMenuOpen] = useState(false)
   const [anchor, setAnchor] = useState<Point | null>(null)
   const [focus, setFocus] = useState<Point | null>(null)
   const [detail, setDetail] = useState<Detail | null>(null)
   const [copyFeedback, setCopyFeedback] = useState<{ message: string; ok: boolean } | null>(null)
+  const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
   const [viewport, setViewport] = useState(() => ({
     scrollTop: props.initialScroll?.top ?? 0,
     bodyHeight: FALLBACK_VIEWPORT_HEIGHT - HEADER_HEIGHT,
@@ -68,6 +75,9 @@ export function DataGrid(props: Props) {
     }
     setViewport((current) => current.scrollTop === next.scrollTop && current.bodyHeight === next.bodyHeight ? current : next)
   }, [])
+  const hidden = useMemo(() => hiddenColumnNames === undefined
+    ? localHidden
+    : new Set(columns.flatMap((column, index) => hiddenColumnNames.has(column.name) ? [index] : [])), [columns, hiddenColumnNames, localHidden])
   const visible = useMemo(() => columns.map((column, index) => ({ column, index })).filter(({ index }) => !hidden.has(index)), [columns, hidden])
   const visiblePosition = useCallback((column: number) => visible.findIndex(({ index }) => index === column), [visible])
   useEffect(() => setWidths((current) => columns.map((column, index) => current[index] ?? defaultWidth(column))), [columns])
@@ -104,9 +114,10 @@ export function DataGrid(props: Props) {
     onVisibleRangeChange?.([start + 1, Math.max(start + 1, end)])
   }, [onVisibleRangeChange, rows.length, viewport])
   useEffect(() => {
-    lastLoadSize.current = null; setAnchor(null); setFocus(null); setDetail(null); setCopyFeedback(null)
-    setHidden(new Set()); setWidths(columns.map(defaultWidth)); setMenuOpen(false)
-  }, [queryKey])
+    lastLoadSize.current = null; setAnchor(null); setFocus(null); setDetail(null); setCopyFeedback(null); setContextMenu(null)
+    if (hiddenColumnNames === undefined) setLocalHidden(new Set())
+    setWidths(columns.map(defaultWidth))
+  }, [hiddenColumnNames, queryKey])
   useEffect(() => {
     if (status !== 'running' || done || loading || lastRow === undefined || lastRow < rows.length - 5 || lastLoadSize.current === rows.length) return
     lastLoadSize.current = rows.length; onLoadMore?.()
@@ -129,6 +140,13 @@ export function DataGrid(props: Props) {
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape') { setDetail(null); detail.returnFocus.focus() } }
     document.addEventListener('keydown', close); return () => document.removeEventListener('keydown', close)
   }, [detail])
+  useEffect(() => {
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    document.addEventListener('click', close)
+    document.addEventListener('keydown', close)
+    return () => { document.removeEventListener('click', close); document.removeEventListener('keydown', close) }
+  }, [contextMenu])
 
   const selected = (point: Point) => {
     if (!anchor || !focus) return false
@@ -158,7 +176,7 @@ export function DataGrid(props: Props) {
     if (nextVisible >= 0) columnVirtualizer.scrollToIndex(nextVisible, { align: 'auto' })
     requestAnimationFrame(() => scrollRef.current?.querySelector<HTMLElement>(`[data-cell="${next.row}:${next.column}"]`)?.focus())
   }
-  const copy = async (mode: 'cell' | 'row' | 'selection') => {
+  const copyToClipboard = async (mode: 'cell' | 'row' | 'selection') => {
     if (!focus) return
     let region: CellValue[][]
     if (mode === 'cell') region = [[rows[focus.row]?.[focus.column] ?? null]]
@@ -171,8 +189,23 @@ export function DataGrid(props: Props) {
       region = rows.slice(rowStart, rowEnd + 1).map((row) => selectedColumns.map(({ index }) => row[index] ?? null))
     }
     const text = region.map((row) => row.map(formatTsvValue).join('\t')).join('\n')
-    try { await navigator.clipboard.writeText(text); setCopyFeedback({ message: 'Copied to clipboard', ok: true }); onCopyStatus?.('Copied to clipboard', true) }
-    catch { setCopyFeedback({ message: 'Could not copy to clipboard', ok: false }); onCopyStatus?.('Could not copy to clipboard', false) }
+    try { await navigator.clipboard.writeText(text); setCopyFeedback({ message: copyLabels.copiedToClipboard, ok: true }); onCopyStatus?.(copyLabels.copiedToClipboard, true) }
+    catch { setCopyFeedback({ message: copyLabels.couldNotCopyToClipboard, ok: false }); onCopyStatus?.(copyLabels.couldNotCopyToClipboard, false) }
+  }
+  const toggleColumn = (index: number) => {
+    if (hiddenColumnNames !== undefined) {
+      const next = new Set(hiddenColumnNames)
+      const name = columns[index]?.name
+      if (!name) return
+      if (next.has(name)) next.delete(name); else next.add(name)
+      onHiddenColumnNamesChange?.(next)
+      return
+    }
+    setLocalHidden((current) => {
+      const next = new Set(current)
+      if (next.has(index)) next.delete(index); else next.add(index)
+      return next
+    })
   }
   const resizeKey = (event: React.KeyboardEvent, index: number) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
@@ -202,21 +235,21 @@ export function DataGrid(props: Props) {
   const totalWidth = ROW_NUMBER_WIDTH + columnVirtualizer.getTotalSize()
 
   return <section className="data-grid-shell">
-    <div className="grid-toolbar">
-      <button type="button" disabled={!focus} onClick={() => void copy('cell')}>Copy cell</button>
-      <button type="button" disabled={!focus} onClick={() => void copy('row')}>Copy row</button>
-      <button type="button" disabled={!focus} onClick={() => void copy('selection')}>Copy selection</button>
-      <button type="button" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>Columns</button>
-      {menuOpen && <fieldset className="column-menu"><legend>Visible columns</legend>{columns.map((column, index) => <label key={column.name}>
-        <input type="checkbox" aria-label={column.name} checked={!hidden.has(index)} onChange={() => setHidden((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next })} /> {column.name}
-      </label>)}</fieldset>}
-    </div>
     <div className="sr-status" role="status" aria-live="polite">{copyFeedback?.message ?? ''}</div>
     {copyFeedback && <div className={`copy-toast copy-toast-${copyFeedback.ok ? 'success' : 'error'}`}>{copyFeedback.message}</div>}
+    {contextMenu && <div className="grid-context-menu" role="menu" aria-label={contextMenu.source === 'cell' ? copyLabels.copyOptions : copyLabels.columnOptions} style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}>
+      {contextMenu.source === 'cell' && <><button type="button" role="menuitem" onClick={() => { void copyToClipboard('cell'); setContextMenu(null) }}>{copyLabels.copyCell}</button>
+        <button type="button" role="menuitem" onClick={() => { void copyToClipboard('row'); setContextMenu(null) }}>{copyLabels.copyRow}</button>
+        <button type="button" role="menuitem" onClick={() => { void copyToClipboard('selection'); setContextMenu(null) }}>{copyLabels.copySelection}</button>
+        <button type="button" role="menuitem" onClick={() => { props.onRefresh?.(); setContextMenu(null) }}>{copyLabels.refresh}</button></>}
+      {contextMenu.source === 'header' && <fieldset className="context-columns"><legend>{copyLabels.visibleColumns}</legend>{columns.map((column, index) => <label key={column.name}>
+        <input type="checkbox" aria-label={column.name} checked={!hidden.has(index)} onChange={() => toggleColumn(index)} /> {column.name}
+      </label>)}</fieldset>}
+    </div>}
     <div ref={setScrollRef} className="data-grid" role="grid" tabIndex={0} aria-rowcount={rows.length + 1} aria-colcount={visible.length + 1} onScroll={handleScroll} onKeyDown={enterGrid}>
       <div className="grid-header" role="row" aria-rowindex={1} style={{ width: totalWidth }}>
         <div className="row-number header-number" role="columnheader" aria-colindex={1}>#</div>
-        {virtualColumns.map((virtual) => { const item = visible[virtual.index]; const width = widths[item.index]; return <div key={item.index} role="columnheader" aria-colindex={virtual.index + 2} className="grid-header-cell" style={{ left: ROW_NUMBER_WIDTH + virtual.start, width }}>
+        {virtualColumns.map((virtual) => { const item = visible[virtual.index]; const width = widths[item.index]; return <div key={item.index} role="columnheader" aria-colindex={virtual.index + 2} className="grid-header-cell" style={{ left: ROW_NUMBER_WIDTH + virtual.start, width }} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, source: 'header' }) }}>
           <span>{item.column.name}</span><small>{item.column.logicalType}</small>
           <span role="separator" tabIndex={0} aria-label={`Resize ${item.column.name}`} aria-orientation="vertical" aria-valuemin={MIN_WIDTH} aria-valuemax={MAX_WIDTH} aria-valuenow={width} onKeyDown={(event) => resizeKey(event, item.index)} onPointerDown={(event) => startResize(event, item.index)} />
         </div> })}
@@ -231,6 +264,10 @@ export function DataGrid(props: Props) {
             style={{ left: ROW_NUMBER_WIDTH + virtualColumn.start, width: widths[item.index] }}
             onClick={(event) => { select(point, event.shiftKey, event.currentTarget); openDetail(value, event.currentTarget) }} onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === 'F2') { event.preventDefault(); openDetail(value, event.currentTarget) } else navigate(event, point)
+            }} onContextMenu={(event) => {
+              event.preventDefault()
+              if (!selected(point)) select(point, false, event.currentTarget)
+              setContextMenu({ x: event.clientX, y: event.clientY, source: 'cell' })
             }}
           >{formatted.display}</div> })}
         </div>)}

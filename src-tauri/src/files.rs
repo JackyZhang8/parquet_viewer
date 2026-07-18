@@ -20,7 +20,11 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 #[cfg(windows)]
-use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
 
 use crate::AppState;
 use crate::error::AppError;
@@ -345,6 +349,17 @@ pub async fn reload_file(
 }
 
 #[tauri::command]
+pub async fn check_file_changed(
+    file_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, AppError> {
+    let registry = state.files.clone();
+    tauri::async_runtime::spawn_blocking(move || registry.is_stale(&file_id))
+        .await
+        .map_err(|error| AppError::Internal(format!("check file changed task failed: {error}")))?
+}
+
+#[tauri::command]
 pub async fn close_file(file_id: String, state: State<'_, AppState>) -> Result<(), AppError> {
     state.queries.close_file(&file_id);
     state.exports.close_file(&file_id);
@@ -447,12 +462,12 @@ fn fingerprint_from_open_file(
         canonical_path: canonical_path.to_owned(),
         size: metadata.len(),
         modified,
-        identity: file_identity(&metadata),
+        identity: file_identity(file, &metadata),
     })
 }
 
 #[cfg(unix)]
-fn file_identity(metadata: &Metadata) -> FileIdentity {
+fn file_identity(_file: &File, metadata: &Metadata) -> FileIdentity {
     FileIdentity::Unix {
         device: metadata.dev(),
         inode: metadata.ino(),
@@ -460,15 +475,22 @@ fn file_identity(metadata: &Metadata) -> FileIdentity {
 }
 
 #[cfg(windows)]
-fn file_identity(metadata: &Metadata) -> FileIdentity {
+fn file_identity(file: &File, _metadata: &Metadata) -> FileIdentity {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return FileIdentity::Windows {
+            volume_serial_number: None,
+            file_index: None,
+        };
+    }
     FileIdentity::Windows {
-        volume_serial_number: metadata.volume_serial_number(),
-        file_index: metadata.file_index(),
+        volume_serial_number: Some(information.dwVolumeSerialNumber),
+        file_index: Some((u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow)),
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn file_identity(_metadata: &Metadata) -> FileIdentity {
+fn file_identity(_file: &File, _metadata: &Metadata) -> FileIdentity {
     FileIdentity::Unavailable
 }
 

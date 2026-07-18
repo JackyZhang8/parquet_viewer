@@ -32,16 +32,22 @@ const emptyRestore = (): RestoredSession => ({
 const api = (overrides: Partial<DesktopApi> = {}): DesktopApi => ({
   openFiles: vi.fn(async (paths: string[]) => paths.map((path, i) => ({ ok: true, metadata: metadata(`f${i}`, path) }) as OpenFileOutcome)),
   closeFile: vi.fn(async () => undefined),
+  reloadFile: vi.fn(async (fileId: string) => metadata(fileId, '/reloaded.parquet')),
+  isFileChanged: vi.fn(async () => false),
   startFilterQuery: vi.fn(async (): Promise<QueryStarted> => ({ queryId: 'q', columns: [] })),
   startQuery: vi.fn(async (): Promise<QueryStarted> => ({ queryId: 'q', columns: [] })),
   fetchQueryBatch: vi.fn(async (): Promise<QueryBatch> => ({ queryId: 'q', rows: [], done: true, truncated: false, returnedRows: '0', elapsedMs: '0' })),
   cancelQuery: vi.fn(async () => undefined),
+  cancelFileQueries: vi.fn(async () => undefined),
+  inspectExport: vi.fn(async () => ({ estimatedRows: '1', requiresConfirmation: false })),
   startExport: vi.fn(async () => ({ exportId: 'export-1' })),
   cancelExport: vi.fn(async () => undefined),
   onExportProgress: vi.fn(async () => () => undefined),
   pickCsvDestination: vi.fn(async () => null),
+  confirmLargeExport: vi.fn(async () => true),
   confirmExportOverwrite: vi.fn(async () => false),
-  loadSettings: vi.fn(async () => ({ theme: 'system' as const, batchSize: 500, previewLimit: 10000, memoryLimitMb: 512, tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: true })),
+  confirmCloseTabs: vi.fn(async () => true),
+  loadSettings: vi.fn(async () => ({ language: 'en' as const, theme: 'system' as const, batchSize: 500, previewLimit: 10000, memoryLimitMb: 512, tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: true })),
   saveSettings: vi.fn(async (settings) => settings),
   pickDirectory: vi.fn(async () => null),
   loadSession: vi.fn(async () => emptyRestore()),
@@ -84,6 +90,22 @@ describe('workspace store', () => {
     expect(store.getState().tabs).toHaveLength(1)
     expect(store.getState().activeTabId).toBe(store.getState().tabs[0].id)
     store.getState().dispose()
+  })
+
+  it('reloads a tab metadata after cancelling its file queries and clears the old result', async () => {
+    const refreshed = { ...metadata('f0', '/a.parquet'), rowCount: '9' }
+    const desktop = api({ reloadFile: vi.fn(async () => refreshed) })
+    const store = createWorkspaceStore(desktop)
+    await store.getState().openPaths(['/a.parquet'])
+    const tab = store.getState().tabs[0]
+    await store.getState().runFilterQuery(tab.id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 100 }, 50)
+
+    await store.getState().reloadTab(tab.id)
+
+    expect(desktop.cancelFileQueries).toHaveBeenCalledWith(tab.fileId)
+    expect(desktop.reloadFile).toHaveBeenCalledWith(tab.fileId)
+    expect(store.getState().tabs[0].metadata?.rowCount).toBe('9')
+    expect(store.getState().queriesByTab[tab.id]).toBeUndefined()
   })
 
   it('closes active/others/right, reorders, and keeps independent drafts and view state', async () => {
@@ -152,6 +174,20 @@ describe('workspace store', () => {
     expect(saved.tabs[0]).not.toHaveProperty('metadata')
     expect(saved.tabs[0]).not.toHaveProperty('status')
     expect(saved.tabs[0].fileId).toBe('f0')
+    store.getState().dispose()
+  })
+
+  it('clears a stale Session save error after a later successful save', async () => {
+    const desktop = api({ saveSession: vi.fn().mockRejectedValueOnce(new Error('transient')).mockResolvedValueOnce(undefined) })
+    const store = createWorkspaceStore(desktop)
+    await store.getState().hydrate()
+    await store.getState().openPaths(['/a.parquet'])
+
+    await store.getState().flushSave()
+    expect(store.getState().pathErrors['Session save']).toMatchObject({ code: 'INTERNAL_ERROR' })
+
+    await store.getState().flushSave()
+    expect(store.getState().pathErrors['Session save']).toBeUndefined()
     store.getState().dispose()
   })
 
@@ -391,6 +427,25 @@ describe('workspace store', () => {
     expect(store.getState().queriesByTab[id].status).toBe('queued')
     starting.resolve({ queryId: 'q', columns: [] }); await run
     expect(store.getState().queriesByTab[id].status).toBe('done')
+  })
+
+  it('cancels a queued query by file before the backend returns a query ID', async () => {
+    const starting = deferred<QueryStarted>()
+    const cancelFileQueries = vi.fn(async () => undefined)
+    const desktop = api({ startFilterQuery: vi.fn(() => starting.promise), cancelFileQueries })
+    const store = createWorkspaceStore(desktop)
+    await store.getState().openPaths(['/a'])
+    const tab = store.getState().tabs[0]
+
+    const run = store.getState().runFilterQuery(tab.id, {
+      selectedColumns: [], filters: [], sorts: [], previewLimit: 5,
+    })
+    expect(store.getState().queriesByTab[tab.id].status).toBe('queued')
+    await store.getState().cancelQuery(tab.id)
+
+    expect(cancelFileQueries).toHaveBeenCalledWith(tab.fileId)
+    starting.resolve({ queryId: 'q', columns: [] })
+    await run
   })
 
   it('rejects preview limits above the UI cap without calling the backend', async () => {

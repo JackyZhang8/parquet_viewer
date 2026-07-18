@@ -1,9 +1,11 @@
 import MonacoEditor, { type OnMount } from '@monaco-editor/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { editor, languages, Position } from 'monaco-editor'
-import type { AppError, ColumnSchema } from '../../domain/types'
+import { labelsFor } from '../../app/labels'
+import type { AppError, AppLanguage, AppTheme, ColumnSchema } from '../../domain/types'
 import { getSqlCompletions } from './sqlCompletion'
 import { formatSql } from './sqlFormatting'
+import { dollarDelimiterAt } from './sqlLexing'
 
 interface Props {
   tabId: string
@@ -16,6 +18,8 @@ interface Props {
   onRun(previewLimit: number): void
   onHeightChange(height: number): void
   initialPreviewLimit?: number
+  language?: AppLanguage
+  theme?: AppTheme
 }
 
 const MIN_HEIGHT = 120
@@ -81,8 +85,41 @@ export const columnNameAtPosition = (line: string, column: number): string | nul
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(word) ? word : null
 }
 
-export function SqlEditor({ tabId, fileId, value, columns, height, error, onChange, onRun, onHeightChange, initialPreviewLimit = 10_000 }: Props) {
+const mutatingSqlKeywords = new Set([
+  'ALTER', 'ATTACH', 'COPY', 'CREATE', 'DELETE', 'DETACH', 'DROP', 'GRANT', 'INSERT',
+  'MERGE', 'PRAGMA', 'REPLACE', 'REVOKE', 'TRUNCATE', 'UPDATE', 'VACUUM',
+])
+
+export const containsMutatingSql = (sql: string) => {
+  for (let index = 0; index < sql.length;) {
+    if (/\s/.test(sql[index])) { index += 1; continue }
+    if (sql.startsWith('--', index)) { const end = sql.indexOf('\n', index + 2); index = end < 0 ? sql.length : end + 1; continue }
+    if (sql.startsWith('/*', index)) { const end = sql.indexOf('*/', index + 2); index = end < 0 ? sql.length : end + 2; continue }
+    if (sql[index] === "'" || sql[index] === '"') {
+      const quote = sql[index]; index += 1
+      while (index < sql.length) {
+        if (sql[index] === quote && sql[index + 1] === quote) { index += 2; continue }
+        if (sql[index] === quote) { index += 1; break }
+        index += 1
+      }
+      continue
+    }
+    const delimiter = dollarDelimiterAt(sql, index)
+    if (delimiter) { const end = sql.indexOf(delimiter, index + delimiter.length); index = end < 0 ? sql.length : end + delimiter.length; continue }
+    if (/[A-Za-z_]/.test(sql[index])) {
+      const start = index
+      while (index < sql.length && /[A-Za-z0-9_$]/.test(sql[index])) index += 1
+      if (mutatingSqlKeywords.has(sql.slice(start, index).toUpperCase())) return true
+      continue
+    }
+    index += 1
+  }
+  return false
+}
+
+export function SqlEditor({ tabId, fileId, value, columns, height, error, onChange, onRun, onHeightChange, initialPreviewLimit = 10_000, language = 'en', theme = 'system' }: Props) {
   const uri = useMemo(() => `parquet-sql://${encodeURIComponent(fileId)}/${encodeURIComponent(tabId)}`, [fileId, tabId])
+  const copy = labelsFor(language)
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null)
   const disposablesRef = useRef<Array<{ dispose(): void }>>([])
@@ -93,7 +130,15 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
   const [mounted, setMounted] = useState(0)
   const [previewLimit, setPreviewLimit] = useState(initialPreviewLimit)
   const [copyFeedback, setCopyFeedback] = useState<'success' | 'error' | null>(null)
-  const dark = typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches
+  const [readOnlyOpen, setReadOnlyOpen] = useState(false)
+  const systemDark = typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches
+  const dark = theme === 'dark' || (theme === 'system' && systemDark)
+  const quotedFirstColumn = columns[0] ? `"${columns[0].name.replaceAll('"', '""')}"` : null
+  const examples = [
+    { id: 'preview', label: copy.sqlExamplePreview, sql: 'SELECT *\nFROM data\nLIMIT 100' },
+    { id: 'count', label: copy.sqlExampleCount, sql: 'SELECT COUNT(*) AS row_count\nFROM data' },
+    ...(quotedFirstColumn ? [{ id: 'non-null', label: copy.sqlExampleNonNull, sql: `SELECT *\nFROM data\nWHERE ${quotedFirstColumn} IS NOT NULL\nLIMIT 100` }] : []),
+  ]
 
   useEffect(() => setPreviewLimit(initialPreviewLimit), [initialPreviewLimit])
 
@@ -102,8 +147,17 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
     if (model && monacoRef.current) monacoRef.current.editor.setModelMarkers(model, MARKER_OWNER, [])
   }
 
-  const run = () => { clearMarkers(); onRunRef.current(previewLimit) }
+  const run = () => {
+    clearMarkers()
+    if (containsMutatingSql(valueRef.current)) { setReadOnlyOpen(true); return }
+    onRunRef.current(previewLimit)
+  }
   const format = () => { void editorRef.current?.getAction('editor.action.formatDocument')?.run() }
+  const loadExample = (id: string) => {
+    const example = examples.find((item) => item.id === id)
+    if (!example) return
+    clearMarkers(); onChange(example.sql); editorRef.current?.focus()
+  }
 
   const onMount: OnMount = (instance, monaco) => {
     editorRef.current = instance; monacoRef.current = monaco
@@ -209,28 +263,41 @@ export function SqlEditor({ tabId, fileId, value, columns, height, error, onChan
     if (next !== undefined) { event.preventDefault(); onHeightChange(clampHeight(next)) }
   }
 
-  return <section className="sql-editor-shell" style={{ height: clampHeight(height) }}>
+  return <>
+    <section className="sql-editor-shell" style={{ height: clampHeight(height) }}>
     <div className="sql-toolbar">
-      <strong>SQL</strong><span>Table: <code>data</code></span>
-      <label>Preview rows <input aria-label="SQL preview rows" type="number" min={1} max={100_000} value={previewLimit}
+      <strong>SQL</strong><span>{copy.table}: <code>data</code></span>
+      <select className="sql-example-select settings-style-select" aria-label={copy.sqlExamples} value="" onChange={(event) => loadExample(event.target.value)}>
+        <option value="">{copy.sqlExamples}</option>
+        {examples.map((example) => <option key={example.id} value={example.id}>{example.label}</option>)}
+      </select>
+      <label>{copy.previewRows} <input aria-label={copy.sqlPreviewRows} type="number" min={1} max={100_000} value={previewLimit}
         onChange={(event) => setPreviewLimit(Number(event.target.value))} /></label>
-      <button type="button" onClick={format}>Format SQL</button>
-      <button type="button" className="primary-button" onClick={run}>Run SQL</button>
+      <button type="button" onClick={format}>{copy.formatSql}</button>
+      <button type="button" className="primary-button" onClick={run}>{copy.runSql}</button>
     </div>
     <div className="sql-editor-body">
       <MonacoEditor path={uri} keepCurrentModel language="sql" theme={dark ? 'vs-dark' : 'light'} value={value}
         onChange={(next) => { clearMarkers(); onChange(next ?? '') }}
-        onMount={onMount} options={{ ariaLabel: 'SQL editor', minimap: { enabled: false }, wordWrap: 'on', automaticLayout: true, scrollBeyondLastLine: false }} />
+        onMount={onMount} options={{ ariaLabel: copy.sqlEditor, minimap: { enabled: false }, wordWrap: 'on', automaticLayout: true, scrollBeyondLastLine: false }} />
     </div>
     {error?.detail && <details className="sql-error-details">
-      <summary>Error details</summary>
-      <pre aria-label="SQL error details" tabIndex={0}>{error.detail}</pre>
-      <button type="button" onClick={() => void copyDetails()}>Copy details</button>
-      {copyFeedback === 'success' && <span role="status">Copied details</span>}
-      {copyFeedback === 'error' && <span role="alert">Could not copy details</span>}
+      <summary>{copy.errorDetails}</summary>
+      <pre aria-label={copy.sqlErrorDetails} tabIndex={0}>{error.detail}</pre>
+      <button type="button" onClick={() => void copyDetails()}>{copy.copyDetails}</button>
+      {copyFeedback === 'success' && <span role="status">{copy.copiedDetails}</span>}
+      {copyFeedback === 'error' && <span role="alert">{copy.couldNotCopyDetails}</span>}
     </details>}
-    <div className="sql-resize-handle" role="separator" aria-label="Resize SQL editor" aria-orientation="horizontal"
+    <div className="sql-resize-handle" role="separator" aria-label={copy.resizeSqlEditor} aria-orientation="horizontal"
       aria-valuemin={MIN_HEIGHT} aria-valuemax={MAX_HEIGHT} aria-valuenow={clampHeight(height)} tabIndex={0}
       onPointerDown={startResize} onKeyDown={resizeKey} />
-  </section>
+    </section>
+    {readOnlyOpen && <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setReadOnlyOpen(false) }}>
+      <section className="read-only-dialog" role="dialog" aria-modal="true" aria-label={copy.readOnlySqlTitle}>
+        <header><strong>{copy.readOnlySqlTitle}</strong><button type="button" aria-label={copy.closeReadOnlySql} onClick={() => setReadOnlyOpen(false)}>×</button></header>
+        <p>{copy.readOnlySqlMessage}</p>
+        <footer><button type="button" onClick={() => setReadOnlyOpen(false)}>{copy.close}</button></footer>
+      </section>
+    </div>}
+  </>
 }

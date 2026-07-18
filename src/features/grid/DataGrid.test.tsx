@@ -11,6 +11,10 @@ const appCss = readFileSync(resolve(process.cwd(), 'src/app/app.css'), 'utf8')
 const columns = (count: number) => Array.from({ length: count }, (_, index) => ({
   name: `column_${index}`, logicalType: index % 2 ? 'VARCHAR' : 'INT64', nullable: true,
 }))
+const openColumnMenu = () => {
+  fireEvent.contextMenu(screen.getByRole('columnheader', { name: /column_0/i }), { clientX: 120, clientY: 44 })
+  return screen.getByRole('group', { name: 'Visible columns' })
+}
 
 it('virtualizes both 10k rows and 200 columns with a bounded cell mount', () => {
   const sharedRow = Array.from({ length: 200 }, (_, column) => `value:${column}`)
@@ -40,13 +44,70 @@ it('selects a rectangle, copies TSV, and reports clipboard errors safely', async
   render(<DataGrid queryKey="copy-1" columns={columns(3)} rows={[[1, 'a\tb', null], [2, 'x\ny', true]]} status="done" done />)
   const cells = screen.getAllByRole('gridcell')
   await userEvent.click(cells.find((cell) => cell.textContent === '1')!)
-  fireEvent.click(cells.find((cell) => cell.textContent === 'x\ny')!, { shiftKey: true })
-  await userEvent.click(screen.getByRole('button', { name: 'Copy selection' }))
+  const finalCell = cells.find((cell) => cell.textContent === 'x\ny')!
+  fireEvent.click(finalCell, { shiftKey: true })
+  fireEvent.contextMenu(finalCell, { clientX: 120, clientY: 80 })
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Copy selection' }))
   expect(writeText).toHaveBeenCalledWith('1\ta\\tb\n2\tx\\ny')
   expect(screen.getByRole('status')).toHaveTextContent(/copied/i)
   writeText.mockRejectedValueOnce(new Error('denied'))
-  await userEvent.click(screen.getByRole('button', { name: 'Copy selection' }))
+  fireEvent.contextMenu(finalCell, { clientX: 120, clientY: 80 })
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Copy selection' }))
   expect(screen.getByRole('status')).toHaveTextContent(/could not copy/i)
+})
+
+it('moves copy commands from the toolbar into a cell context menu', async () => {
+  const writeText = vi.fn(async () => undefined)
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  render(<DataGrid queryKey="context-copy" columns={columns(2)} rows={[[1, 'a']]} status="done" done />)
+
+  expect(screen.queryByRole('button', { name: 'Copy cell' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Columns' })).not.toBeInTheDocument()
+  const cell = screen.getByRole('gridcell', { name: /column_0.*1/i })
+  fireEvent.contextMenu(cell, { clientX: 120, clientY: 80 })
+  expect(screen.getByRole('menu', { name: 'Copy options' })).toBeInTheDocument()
+  expect(screen.queryByRole('group', { name: 'Visible columns' })).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Copy cell' }))
+  expect(writeText).toHaveBeenCalledWith('1')
+})
+
+it('puts Refresh last in the data-cell context menu and invokes it', async () => {
+  const onRefresh = vi.fn()
+  render(<DataGrid queryKey="refresh" columns={columns(1)} rows={[[1]]} status="done" done onRefresh={onRefresh} />)
+
+  fireEvent.contextMenu(screen.getByRole('gridcell', { name: /column_0.*1/i }), { clientX: 120, clientY: 80 })
+  const items = screen.getAllByRole('menuitem')
+  expect(items.at(-1)).toHaveTextContent('Refresh')
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Refresh' }))
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+})
+
+it('localizes the data-cell Refresh command', () => {
+  render(<DataGrid language="zh" queryKey="refresh-zh" columns={columns(1)} rows={[[1]]} status="done" done />)
+
+  fireEvent.contextMenu(screen.getByRole('gridcell', { name: /column_0.*1/i }), { clientX: 120, clientY: 80 })
+  expect(screen.getByRole('menuitem', { name: '刷新' })).toBeInTheDocument()
+})
+
+it('shows column controls only from a header context menu', () => {
+  render(<DataGrid queryKey="header-columns" columns={columns(2)} rows={[[1, 'a']]} status="done" done />)
+
+  fireEvent.contextMenu(screen.getByRole('gridcell', { name: /column_0.*1/i }), { clientX: 120, clientY: 80 })
+  expect(screen.queryByRole('group', { name: 'Visible columns' })).not.toBeInTheDocument()
+
+  fireEvent.contextMenu(screen.getByRole('columnheader', { name: /column_0/i }), { clientX: 120, clientY: 44 })
+  expect(screen.getByRole('group', { name: 'Visible columns' })).toBeInTheDocument()
+  expect(screen.queryByRole('menuitem', { name: 'Copy cell' })).not.toBeInTheDocument()
+})
+
+it('localizes context menus', () => {
+  render(<DataGrid language="zh" queryKey="localized-context" columns={columns(2)} rows={[[1, 'a']]} status="done" done />)
+
+  fireEvent.contextMenu(screen.getByRole('gridcell', { name: /column_0.*1/i }), { clientX: 120, clientY: 80 })
+  expect(screen.getByRole('menuitem', { name: '复制单元格' })).toBeInTheDocument()
+
+  fireEvent.contextMenu(screen.getByRole('columnheader', { name: /column_0/i }), { clientX: 120, clientY: 44 })
+  expect(screen.getByRole('group', { name: '显示列' })).toBeInTheDocument()
 })
 
 it('supports keyboard navigation, resizing, hiding, and full-value detail', async () => {
@@ -65,7 +126,7 @@ it('supports keyboard navigation, resizing, hiding, and full-value detail', asyn
   const before = Number(handle.getAttribute('aria-valuenow'))
   handle.focus(); fireEvent.keyDown(handle, { key: 'ArrowRight' })
   await waitFor(() => expect(Number(screen.getByRole('separator', { name: /resize column_0/i }).getAttribute('aria-valuenow'))).toBeGreaterThan(before))
-  await userEvent.click(screen.getByRole('button', { name: /columns/i }))
+  openColumnMenu()
   await userEvent.click(screen.getByRole('checkbox', { name: 'column_1' }))
   expect(screen.queryByRole('columnheader', { name: /column_1/i })).not.toBeInTheDocument()
 })
@@ -85,7 +146,7 @@ it('resets near-end loading when a replacement query has the same row count', as
 
 it('navigates horizontally through visible columns only', async () => {
   render(<DataGrid queryKey="hidden-nav" columns={columns(3)} rows={[["left", "secret", "right"]]} status="done" done />)
-  await userEvent.click(screen.getByRole('button', { name: 'Columns' }))
+  openColumnMenu()
   await userEvent.click(screen.getByRole('checkbox', { name: 'column_1' }))
   const left = screen.getByRole('gridcell', { name: /column_0.*left/i })
   await userEvent.click(left); await userEvent.keyboard('{ArrowRight}')
@@ -96,18 +157,21 @@ it('copies rectangular selections from visible columns only', async () => {
   const writeText = vi.fn(async () => undefined)
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
   render(<DataGrid queryKey="hidden-copy" columns={columns(3)} rows={[["left", "secret", "right"]]} status="done" done />)
-  await userEvent.click(screen.getByRole('button', { name: 'Columns' }))
+  openColumnMenu()
   await userEvent.click(screen.getByRole('checkbox', { name: 'column_1' }))
   fireEvent.click(screen.getByRole('gridcell', { name: /column_0.*left/i }))
-  fireEvent.click(screen.getByRole('gridcell', { name: /column_2.*right/i }), { shiftKey: true })
-  await userEvent.click(screen.getByRole('button', { name: 'Copy selection' }))
+  const right = screen.getByRole('gridcell', { name: /column_2.*right/i })
+  fireEvent.click(right, { shiftKey: true })
+  fireEvent.contextMenu(right, { clientX: 120, clientY: 80 })
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Copy selection' }))
   expect(writeText).toHaveBeenCalledWith('left\tright')
 })
 
 it('moves focus safely when the focused column becomes hidden', async () => {
   render(<DataGrid queryKey="hidden-focus" columns={columns(3)} rows={[["left", "secret", "right"]]} status="done" done />)
-  await userEvent.click(screen.getByRole('gridcell', { name: /column_1.*secret/i }))
-  await userEvent.click(screen.getByRole('button', { name: 'Columns' }))
+  const secret = screen.getByRole('gridcell', { name: /column_1.*secret/i })
+  await userEvent.click(secret)
+  openColumnMenu()
   await userEvent.click(screen.getByRole('checkbox', { name: 'column_1' }))
   await waitFor(() => expect(screen.getByRole('gridcell', { name: /column_2.*right/i })).toHaveAttribute('aria-selected', 'true'))
 })
@@ -132,7 +196,7 @@ it('recomputes geometry after pointer resize and hide/unhide', async () => {
     expect(view.container.querySelector<HTMLElement>('.grid-body')!.style.width).toBe('522px')
     expect(screen.getByRole('columnheader', { name: /column_1/i })).toHaveStyle({ left: '214px' })
   })
-  await userEvent.click(screen.getByRole('button', { name: 'Columns' })); await userEvent.click(screen.getByRole('checkbox', { name: 'column_0' }))
+  openColumnMenu(); await userEvent.click(screen.getByRole('checkbox', { name: 'column_0' }))
   expect(screen.getByRole('columnheader', { name: /column_1/i })).toHaveStyle({ left: '56px' })
   await userEvent.click(screen.getByRole('checkbox', { name: 'column_0' }))
   await waitFor(() => expect(screen.getByRole('columnheader', { name: /column_1/i })).toHaveStyle({ left: '214px' }))
@@ -165,7 +229,7 @@ it('indexes virtualized headers and cells by visible ARIA order', async () => {
   expect(screen.getAllByRole('row')[1]).toHaveAttribute('aria-rowindex', '2')
   expect(screen.getByRole('rowheader')).toHaveAttribute('aria-colindex', '1')
   expect(screen.getByRole('gridcell', { name: /column_0/i })).toHaveAttribute('aria-colindex', '2')
-  await userEvent.click(screen.getByRole('button', { name: 'Columns' })); await userEvent.click(screen.getByRole('checkbox', { name: 'column_1' }))
+  openColumnMenu(); await userEvent.click(screen.getByRole('checkbox', { name: 'column_1' }))
   expect(screen.getByRole('columnheader', { name: /column_2/i })).toHaveAttribute('aria-colindex', '3')
   expect(screen.getByRole('gridcell', { name: /column_2/i })).toHaveAttribute('aria-colindex', '3')
 })
@@ -217,8 +281,9 @@ it('shows visible copy success and error feedback', async () => {
   const writeText = vi.fn(async () => undefined)
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
   const view = render(<DataGrid queryKey="toast" columns={columns(1)} rows={[[1]]} status="done" done />)
-  await userEvent.click(screen.getByRole('gridcell')); await userEvent.click(screen.getByRole('button', { name: 'Copy cell' }))
+  const cell = screen.getByRole('gridcell')
+  await userEvent.click(cell); fireEvent.contextMenu(cell, { clientX: 120, clientY: 80 }); await userEvent.click(screen.getByRole('menuitem', { name: 'Copy cell' }))
   expect(view.container.querySelector('.copy-toast-success')).toHaveTextContent('Copied to clipboard')
-  writeText.mockRejectedValueOnce(new Error('denied')); await userEvent.click(screen.getByRole('button', { name: 'Copy cell' }))
+  writeText.mockRejectedValueOnce(new Error('denied')); fireEvent.contextMenu(cell, { clientX: 120, clientY: 80 }); await userEvent.click(screen.getByRole('menuitem', { name: 'Copy cell' }))
   expect(view.container.querySelector('.copy-toast-error')).toHaveTextContent('Could not copy to clipboard')
 })

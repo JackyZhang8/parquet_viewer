@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import type { ComponentProps } from 'react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
 import { StatusBar } from './StatusBar'
@@ -49,4 +50,29 @@ it('reports completed export rows and sanitized export errors', () => {
   view.rerender(<StatusBar status="done" elapsedMs="4" returnedRows="20" visibleRange={null} totalRows={20}
     exportProgress={{ exportId: 'export-1', status: 'error', rowsWritten: '0', error: { code: 'RESOURCE_EXHAUSTED', message: 'Disk full', detail: null } }} />)
   expect(screen.getByRole('alert')).toHaveTextContent(/disk full/i)
+})
+
+it('renders determinate progress for an inspected export', () => {
+  const props = {
+    status: 'done', elapsedMs: '4', returnedRows: '20', visibleRange: null, totalRows: 20,
+    exportProgress: { exportId: 'export-1', status: 'running', rowsWritten: '25000', error: null },
+    exportTotalRows: '100000',
+  } as unknown as ComponentProps<typeof StatusBar>
+
+  render(<StatusBar {...props} />)
+
+  expect(screen.getByRole('progressbar', { name: /csv export progress/i })).toHaveAttribute('value', '25')
+  expect(screen.getByRole('status', { name: /export status/i })).toHaveTextContent(/25,000 of 100,000/i)
+})
+
+it('announces export size inspection before a potentially large export', () => {
+  const props = {
+    status: 'done', elapsedMs: '4', returnedRows: '20', visibleRange: null, totalRows: 20,
+    canExport: true, exportPreparing: true,
+  } as unknown as ComponentProps<typeof StatusBar>
+
+  render(<StatusBar {...props} />)
+
+  expect(screen.getByRole('status', { name: /export preparation/i })).toHaveTextContent(/checking export size/i)
+  expect(screen.queryByRole('button', { name: /export csv/i })).not.toBeInTheDocument()
 })

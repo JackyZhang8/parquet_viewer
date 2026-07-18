@@ -31,9 +31,24 @@ pub enum Theme {
     Dark,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Language {
+    En,
+    Zh,
+}
+
+impl Default for Language {
+    fn default() -> Self {
+        Self::En
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub language: Language,
     pub theme: Theme,
     pub batch_size: u32,
     pub preview_limit: u32,
@@ -47,6 +62,7 @@ pub struct AppSettings {
 impl AppSettings {
     pub fn defaults_for_available_memory(available_memory_bytes: u64) -> Self {
         Self {
+            language: Language::En,
             theme: Theme::System,
             batch_size: 500,
             preview_limit: 10_000,
@@ -284,12 +300,13 @@ pub async fn save_settings(
 mod tests {
     use std::fs;
 
-    use super::{AppSettings, SettingsStore, Theme, default_memory_limit_mb, sanitize_settings};
+    use super::{AppSettings, Language, SettingsStore, Theme, default_memory_limit_mb, sanitize_settings};
 
     #[test]
     fn defaults_match_the_mvp_and_memory_is_bounded_by_available_ram() {
         let settings = AppSettings::defaults_for_available_memory(8 * 1024 * 1024 * 1024);
         assert_eq!(settings.theme, Theme::System);
+        assert_eq!(settings.language, Language::En);
         assert_eq!(settings.batch_size, 500);
         assert_eq!(settings.preview_limit, 10_000);
         assert_eq!(settings.concurrency, 2);
@@ -302,9 +319,20 @@ mod tests {
     }
 
     #[test]
+    fn legacy_settings_without_language_default_to_english() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"theme":"system","batchSize":500,"previewLimit":10000,"memoryLimitMb":512,"tempDirectory":null,"tempDiskWarningMb":1024,"concurrency":2,"restoreTabs":true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(serde_json::to_value(settings).unwrap()["language"], "en");
+    }
+
+    #[test]
     fn unsafe_numeric_settings_are_clamped_to_documented_bounds() {
         let temp = tempfile::tempdir().unwrap();
         let sanitized = sanitize_settings(AppSettings {
+            language: Language::En,
             theme: Theme::Dark,
             batch_size: 0,
             preview_limit: u32::MAX,
@@ -345,6 +373,7 @@ mod tests {
         let path = temp.path().join("settings.json");
         let store = SettingsStore::with_available_memory(&path, 4 * 1024 * 1024 * 1024);
         let expected = sanitize_settings(AppSettings {
+            language: Language::En,
             theme: Theme::Light,
             batch_size: 750,
             preview_limit: 25_000,

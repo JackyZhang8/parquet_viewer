@@ -1,8 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
 import type { WorkspaceTab } from '../../stores/workspace'
 import { FileTabs } from './FileTabs'
+
+const appCss = readFileSync(resolve(process.cwd(), 'src/app/app.css'), 'utf8')
 
 const tab = (id: string, path: string): WorkspaceTab => ({
   id, fileId: id, path, status: 'ready', sqlDraft: '', filters: [], sorts: [],
@@ -10,7 +14,33 @@ const tab = (id: string, path: string): WorkspaceTab => ({
   metadata: { fileId: id, path, name: path.split('/').pop()!, sizeBytes: '2048', rowCount: '3', rowGroupCount: 1, columns: [] },
 })
 
-it('provides accessible activation, keyboard navigation, close, search, and context actions', async () => {
+it('stacks the tab context menu above grid headers', () => {
+  expect(appCss).toMatch(/\.tab-menu \{[^}]*z-index:60/)
+})
+
+it('uses compact type for tab titles and title-bar action buttons', () => {
+  expect(appCss).toMatch(/\.tab-name \{[^}]*font-size:11px/)
+  expect(appCss).toMatch(/\.titlebar-actions button \{[^}]*font-size:12px/)
+})
+
+it('uses the shared menu styling for tab context actions', () => {
+  expect(appCss).toMatch(/\.tab-menu \{[^}]*width:230px[^}]*padding:5px[^}]*border-radius:7px/)
+  expect(appCss).toMatch(/\.tab-menu button \{[^}]*padding:6px 8px[^}]*font-size:12px/)
+})
+
+it('localizes tab context menu actions', () => {
+  render(<FileTabs language="zh" tabs={[tab('a', '/a.parquet')]} activeTabId="a" onActivate={vi.fn()} onClose={vi.fn()} onCloseOthers={vi.fn()} onCloseRight={vi.fn()} onReveal={vi.fn()} />)
+
+  fireEvent.contextMenu(screen.getByRole('tab'), { clientX: 120, clientY: 80 })
+
+  expect(screen.getByRole('menuitem', { name: '关闭' })).toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: '关闭其他标签页' })).toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: '关闭右侧标签页' })).toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: '复制路径' })).toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: '在文件管理器中显示' })).toBeInTheDocument()
+})
+
+it('provides accessible activation, keyboard navigation, close, and context actions', async () => {
   const tabs = [tab('a', '/one/data.parquet'), tab('b', '/two/data.parquet'), tab('c', '/three/other.parquet')]
   const activate = vi.fn(), close = vi.fn(), closeOthers = vi.fn(), closeRight = vi.fn(), reveal = vi.fn()
   const user = userEvent.setup()
@@ -18,6 +48,7 @@ it('provides accessible activation, keyboard navigation, close, search, and cont
   render(<FileTabs tabs={tabs} activeTabId="a" onActivate={activate} onClose={close} onCloseOthers={closeOthers} onCloseRight={closeRight} onReveal={reveal} />)
 
   expect(screen.getByRole('tablist')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /opened files/i })).not.toBeInTheDocument()
   const first = screen.getAllByRole('tab')[0]
   expect(first).toHaveAttribute('aria-selected', 'true')
   first.focus()
@@ -32,11 +63,6 @@ it('provides accessible activation, keyboard navigation, close, search, and cont
   expect(document.activeElement).toBe(first)
   await user.keyboard('{Delete}')
   expect(close).toHaveBeenCalledWith('a')
-
-  await user.click(screen.getByRole('button', { name: /opened files/i }))
-  await user.type(screen.getByRole('searchbox'), 'other')
-  await user.click(screen.getByRole('option', { name: /other.parquet/i }))
-  expect(activate).toHaveBeenCalledWith('c')
 
   await user.pointer({ keys: '[MouseRight]', target: first })
   expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Close' }))
@@ -58,10 +84,35 @@ it('uses sibling tab and close controls and dismisses menus with Escape/outside 
   expect(local.getByRole('menu')).toBeInTheDocument()
   await user.keyboard('{Escape}')
   expect(local.queryByRole('menu')).not.toBeInTheDocument()
-  await user.click(local.getByRole('button', { name: /opened files/i }))
-  expect(document.activeElement).toBe(local.getByRole('searchbox'))
+  await user.pointer({ keys: '[MouseRight]', target: semanticTab })
   await user.click(document.body)
-  expect(local.queryByRole('searchbox')).not.toBeInTheDocument()
+  expect(local.queryByRole('menu')).not.toBeInTheDocument()
+})
+
+it('scrolls overflowed tabs with triangle controls', async () => {
+  const user = userEvent.setup()
+  const view = render(<FileTabs tabs={[tab('a', '/a.parquet'), tab('b', '/b.parquet'), tab('c', '/c.parquet')]} activeTabId="a" onActivate={vi.fn()} onClose={vi.fn()} onCloseOthers={vi.fn()} onCloseRight={vi.fn()} onReveal={vi.fn()} />)
+  const local = within(view.container)
+  const tablist = local.getByRole('tablist')
+  const scrollBy = vi.fn()
+  Object.defineProperties(tablist, {
+    clientWidth: { configurable: true, value: 200 },
+    scrollWidth: { configurable: true, value: 800 },
+    scrollLeft: { configurable: true, writable: true, value: 0 },
+    scrollBy: { configurable: true, value: scrollBy },
+  })
+
+  fireEvent.scroll(tablist)
+
+  expect(await local.findByRole('button', { name: 'Scroll tabs left' })).toBeDisabled()
+  const right = local.getByRole('button', { name: 'Scroll tabs right' })
+  await user.click(right)
+  expect(scrollBy).toHaveBeenCalledWith({ left: 160, behavior: 'smooth' })
+
+  tablist.scrollLeft = 600
+  fireEvent.scroll(tablist)
+  expect(local.getByRole('button', { name: 'Scroll tabs left' })).toBeEnabled()
+  expect(local.getByRole('button', { name: 'Scroll tabs right' })).toBeDisabled()
 })
 
 it('reports rejected context actions without an unhandled promise', async () => {

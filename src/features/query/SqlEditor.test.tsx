@@ -46,7 +46,7 @@ vi.mock('@monaco-editor/react', async () => {
   } }
 })
 
-import { columnNameAtPosition, parseSqlErrorMarker, SqlEditor } from './SqlEditor'
+import { columnNameAtPosition, containsMutatingSql, parseSqlErrorMarker, SqlEditor } from './SqlEditor'
 
 const columns: ColumnSchema[] = [{ name: 'order value', logicalType: 'VARCHAR', nullable: true }]
 const base = { tabId: 'tab-a', fileId: 'file', value: 'SELECT ', columns, height: 180, onChange: vi.fn(), onRun: vi.fn(), onHeightChange: vi.fn() }
@@ -99,6 +99,46 @@ it('updates the controlled draft and runs/formats by toolbar and shortcut', asyn
   expect(onRun).toHaveBeenCalledTimes(2)
   await userEvent.click(screen.getByRole('button', { name: 'Format SQL' }))
   expect(mocks.trigger).toHaveBeenCalled()
+})
+
+it('loads localized SQL examples into the controlled draft', async () => {
+  const onChange = vi.fn()
+  render(<SqlEditor {...base} onChange={onChange} />)
+
+  const examples = screen.getByRole('combobox', { name: 'SQL examples' })
+  expect(examples).toHaveClass('settings-style-select')
+  expect(screen.getByRole('option', { name: 'Preview 100 rows' })).toBeInTheDocument()
+  await userEvent.selectOptions(examples, 'count')
+  expect(onChange).toHaveBeenLastCalledWith('SELECT COUNT(*) AS row_count\nFROM data')
+  await userEvent.selectOptions(examples, 'non-null')
+  expect(onChange).toHaveBeenLastCalledWith('SELECT *\nFROM data\nWHERE "order value" IS NOT NULL\nLIMIT 100')
+})
+
+it('detects mutating SQL but ignores comments and quoted text', () => {
+  expect(containsMutatingSql('DELETE FROM data')).toBe(true)
+  expect(containsMutatingSql('WITH removed AS (DELETE FROM data RETURNING *) SELECT * FROM removed')).toBe(true)
+  expect(containsMutatingSql("SELECT 'DELETE', \"UPDATE\" FROM data -- INSERT")).toBe(false)
+})
+
+it('shows a read-only warning instead of running a mutating statement', async () => {
+  const onRun = vi.fn()
+  render(<SqlEditor {...base} value="UPDATE data SET id = 1" onRun={onRun} />)
+
+  await userEvent.click(screen.getByRole('button', { name: 'Run SQL' }))
+
+  expect(onRun).not.toHaveBeenCalled()
+  const dialog = screen.getByRole('dialog', { name: 'Read-only SQL' })
+  expect(dialog).toHaveTextContent('This viewer is read-only.')
+  await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+  expect(screen.queryByRole('dialog', { name: 'Read-only SQL' })).not.toBeInTheDocument()
+})
+
+it('localizes the read-only warning in Chinese', async () => {
+  render(<SqlEditor {...base} language="zh" value="DELETE FROM data" onRun={vi.fn()} />)
+
+  await userEvent.click(screen.getByRole('button', { name: '运行 SQL' }))
+
+  expect(screen.getByRole('dialog', { name: '只读 SQL' })).toHaveTextContent('不支持 UPDATE、DELETE、INSERT')
 })
 
 it('parses safe locations, falls back, sets error markers, and clears them on edit', () => {
@@ -159,4 +199,11 @@ it('maps schema type families to distinct Monaco completion kinds', () => {
     { uri: { toString: () => 'parquet-sql://file/tab-a' }, getOffsetAt: () => 7 }, { lineNumber: 1, column: 8 },
   ).suggestions
   expect(['flag', 'amount', 'name'].map((label) => suggestions.find((item: { label: string }) => item.label === label).kind)).toEqual([5, 6, 7])
+})
+
+it('uses local Chinese labels in the SQL toolbar', () => {
+  render(<SqlEditor {...base} language="zh" />)
+  expect(screen.getByRole('button', { name: '运行 SQL' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '格式化 SQL' })).toBeInTheDocument()
+  expect(screen.getByRole('spinbutton', { name: 'SQL 预览行数' })).toBeInTheDocument()
 })

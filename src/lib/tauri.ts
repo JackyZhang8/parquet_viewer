@@ -4,7 +4,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { ask, open, save } from '@tauri-apps/plugin-dialog'
 import { revealItemInDir as reveal } from '@tauri-apps/plugin-opener'
 import type {
-  AppError, AppSettings, ExportProgress, ExportRequest, ExportStarted, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted, RestoredSession,
+  AppError, AppLanguage, AppSettings, ExportInspection, ExportInspectionRequest, ExportProgress, ExportRequest, ExportStarted, FileMetadata, FilterQueryStartRequest, QueryBatch, QueryRequest, QueryStarted, RestoredSession,
   SessionSnapshot,
 } from '../domain/types'
 import { isAppError, isAppSettings, isExportProgress, isQueryBatch, isSessionScalar } from '../domain/types'
@@ -16,15 +16,21 @@ export type OpenFileOutcome =
 export interface DesktopApi {
   openFiles(paths: string[]): Promise<OpenFileOutcome[]>
   closeFile(fileId: string): Promise<void>
+  reloadFile(fileId: string): Promise<FileMetadata>
+  isFileChanged(fileId: string): Promise<boolean>
   startFilterQuery(request: FilterQueryStartRequest): Promise<QueryStarted>
   startQuery(request: QueryRequest): Promise<QueryStarted>
   fetchQueryBatch(queryId: string): Promise<QueryBatch>
   cancelQuery(queryId: string): Promise<void>
+  cancelFileQueries(fileId: string): Promise<void>
+  inspectExport(request: ExportInspectionRequest): Promise<ExportInspection>
   startExport(request: ExportRequest): Promise<ExportStarted>
   cancelExport(exportId: string): Promise<void>
   onExportProgress(callback: (progress: ExportProgress) => void): Promise<() => void>
   pickCsvDestination(suggestedName: string): Promise<string | null>
+  confirmLargeExport(estimatedRows: string): Promise<boolean>
   confirmExportOverwrite(path: string): Promise<boolean>
+  confirmCloseTabs(count: number, language: AppLanguage): Promise<boolean>
   loadSettings(): Promise<AppSettings>
   saveSettings(settings: AppSettings): Promise<AppSettings>
   pickDirectory(): Promise<string | null>
@@ -93,6 +99,12 @@ const exportStarted = (value: unknown): ExportStarted => {
   return value as unknown as ExportStarted
 }
 
+const exportInspection = (value: unknown): ExportInspection => {
+  if (!record(value) || !exactKeys(value, ['estimatedRows', 'requiresConfirmation']) ||
+      !u64Decimal(value.estimatedRows) || typeof value.requiresConfirmation !== 'boolean') throw internalError()
+  return value as unknown as ExportInspection
+}
+
 const appSettings = (value: unknown): AppSettings => {
   if (!isAppSettings(value)) throw internalError()
   return value
@@ -159,6 +171,16 @@ export const desktopApi: DesktopApi = {
     return outcomes
   },
   closeFile: (fileId) => invoke('close_file', { fileId }),
+  async reloadFile(fileId) {
+    const reloaded = metadata(await invoke('reload_file', { fileId }))
+    if (!reloaded) throw internalError()
+    return reloaded
+  },
+  async isFileChanged(fileId) {
+    const changed = await invoke('check_file_changed', { fileId })
+    if (typeof changed !== 'boolean') throw internalError()
+    return changed
+  },
   async startFilterQuery(request) {
     return queryStarted(await invoke('start_filter_query', { request }))
   },
@@ -169,6 +191,10 @@ export const desktopApi: DesktopApi = {
     return queryBatch(await invoke('fetch_query_batch', { queryId }))
   },
   cancelQuery: (queryId) => invoke('cancel_query', { queryId }),
+  cancelFileQueries: (fileId) => invoke('cancel_file_queries', { fileId }),
+  async inspectExport(request) {
+    return exportInspection(await invoke('inspect_export', { request }))
+  },
   async startExport(request) {
     return exportStarted(await invoke('start_export', { request }))
   },
@@ -179,7 +205,14 @@ export const desktopApi: DesktopApi = {
     })
   },
   pickCsvDestination: (suggestedName) => save({ defaultPath: suggestedName, filters: [{ name: 'CSV', extensions: ['csv'] }] }),
+  confirmLargeExport: (estimatedRows) => ask(
+    `This export contains ${estimatedRows.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} rows and may take a long time. Continue?`,
+    { title: 'Large CSV export', kind: 'warning' },
+  ),
   confirmExportOverwrite: (path) => ask(`Replace the existing file?\n${path}`, { title: 'Replace CSV export', kind: 'warning' }),
+  confirmCloseTabs: (count, language) => language === 'zh'
+    ? ask(`确定关闭 ${count} 个打开的文件吗？未保存的工作区状态将丢失。`, { title: '关闭文件', kind: 'warning' })
+    : ask(`Close ${count} open file${count === 1 ? '' : 's'}? Unsaved workspace state will be lost.`, { title: 'Close files', kind: 'warning' }),
   async loadSettings() {
     return appSettings(await invoke('load_settings'))
   },

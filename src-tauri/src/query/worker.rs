@@ -432,7 +432,7 @@ mod tests {
     use super::{
         open_configured_connection, query_temp_directory, receive_fair, restrict_external_access,
     };
-    use crate::settings::{AppSettings, Theme};
+    use crate::settings::{AppSettings, Language, Theme};
 
     #[test]
     fn ready_normal_job_runs_after_at_most_one_replacement() {
@@ -458,6 +458,7 @@ mod tests {
         let query_id = uuid::Uuid::new_v4().to_string();
         let base = tempfile::tempdir().unwrap();
         let runtime = AppSettings {
+            language: Language::En,
             theme: Theme::System,
             batch_size: 500,
             preview_limit: 10_000,

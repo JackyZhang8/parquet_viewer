@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { labelsFor } from '../../app/labels'
+import type { AppLanguage } from '../../domain/types'
 import type { WorkspaceTab } from '../../stores/workspace'
 
 interface FileTabsProps {
@@ -10,6 +12,7 @@ interface FileTabsProps {
   onCloseRight(id: string): void | Promise<void>
   onReveal(path: string): void | Promise<void>
   onError?(key: string, error: unknown): void
+  language?: AppLanguage
 }
 
 const size = (tab: WorkspaceTab) => tab.metadata
@@ -17,20 +20,17 @@ const size = (tab: WorkspaceTab) => tab.metadata
   : ''
 
 export function FileTabs(props: FileTabsProps) {
-  const [filesOpen, setFilesOpen] = useState(false)
-  const [search, setSearch] = useState('')
+  const copy = labelsFor(props.language ?? 'en')
   const [menuState, setMenuState] = useState<{ tab: WorkspaceTab; x: number; y: number; invokerId: string } | null>(null)
+  const [tabScrollState, setTabScrollState] = useState({ canLeft: false, canRight: false })
   const tablist = useRef<HTMLDivElement>(null)
   const root = useRef<HTMLDivElement>(null)
   const menu = useRef<HTMLDivElement>(null)
-  const searchBox = useRef<HTMLInputElement>(null)
-  const filtered = useMemo(() => props.tabs.filter((tab) => tab.path.toLowerCase().includes(search.toLowerCase())), [props.tabs, search])
   const focusTab = (id: string) => {
     const exact = tablist.current?.querySelector<HTMLElement>(`[role="tab"][data-tab-id="${CSS.escape(id)}"]`)
     ;(exact ?? tablist.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? tablist.current?.querySelector<HTMLElement>('[role="tab"]'))?.focus()
   }
   const openMenu = (tab: WorkspaceTab, invoker: HTMLElement, x: number, y: number) => {
-    setFilesOpen(false)
     setMenuState({ tab, x, y, invokerId: invoker.dataset.tabId ?? tab.id })
   }
   const dismissMenu = (restoreFocus: boolean) => {
@@ -57,6 +57,20 @@ export function FileTabs(props: FileTabsProps) {
   const run = async (key: string, action: () => void | Promise<void>) => {
     try { await action() } catch (error) { props.onError?.(key, error) }
   }
+  const syncScrollControls = () => {
+    const element = tablist.current
+    if (!element) return
+    const next = {
+      canLeft: element.scrollLeft > 0,
+      canRight: element.scrollLeft + element.clientWidth < element.scrollWidth - 1,
+    }
+    setTabScrollState((current) => current.canLeft === next.canLeft && current.canRight === next.canRight ? current : next)
+  }
+  const scrollTabs = (direction: -1 | 1) => {
+    const element = tablist.current
+    if (!element) return
+    element.scrollBy({ left: direction * Math.max(element.clientWidth * 0.8, 160), behavior: 'smooth' })
+  }
   const menuAction = (key: string, action: () => void | Promise<void>) => {
     const invokerId = menuState?.invokerId
     setMenuState(null)
@@ -74,17 +88,27 @@ export function FileTabs(props: FileTabsProps) {
     if (target !== undefined) { event.preventDefault(); items[target]?.focus() }
   }
   useEffect(() => { if (menuState) menu.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus() }, [menuState])
-  useEffect(() => { if (filesOpen) searchBox.current?.focus() }, [filesOpen])
   useEffect(() => {
-    const dismiss = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) { setMenuState(null); setFilesOpen(false) } }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { dismissMenu(true); setFilesOpen(false) } }
+    const element = tablist.current
+    if (!element) return
+    syncScrollControls()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(syncScrollControls)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [props.tabs.length])
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setMenuState(null) }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') dismissMenu(true) }
     document.addEventListener('pointerdown', dismiss)
     document.addEventListener('keydown', escape)
     return () => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', escape) }
   }, [])
+  const showTabScrollControls = tabScrollState.canLeft || tabScrollState.canRight
   return (
     <div className="tabs-bar" ref={root}>
-      <div className="file-tabs" role="tablist" aria-label="Open files" ref={tablist}>
+      {showTabScrollControls && <button type="button" className="tab-scroll-button" aria-label={copy.scrollTabsLeft} disabled={!tabScrollState.canLeft} onClick={() => scrollTabs(-1)}>◀</button>}
+      <div className="file-tabs" role="tablist" aria-label={copy.openFiles} ref={tablist} onScroll={syncScrollControls}>
         {props.tabs.map((tab, index) => (
           <div key={tab.id} className={`file-tab-wrap ${tab.id === props.activeTabId ? 'active' : ''} ${tab.status}`}>
             <button role="tab" tabIndex={tab.id === props.activeTabId ? 0 : -1} aria-selected={tab.id === props.activeTabId}
@@ -94,26 +118,17 @@ export function FileTabs(props: FileTabsProps) {
               onContextMenu={(event) => { event.preventDefault(); openMenu(tab, event.currentTarget, event.clientX, event.clientY) }}>
               <span className="status-dot" aria-hidden="true" /><span className="tab-name">{tab.metadata?.name ?? tab.path.split(/[\\/]/).pop()}</span>
             </button>
-            <button className="tab-close" aria-label={`Close ${tab.metadata?.name ?? tab.path}`} onClick={() => void run('Close file', () => props.onClose(tab.id))}>×</button>
+            <button className="tab-close" aria-label={copy.closeTab(tab.metadata?.name ?? tab.path)} onClick={() => void run('Close file', () => props.onClose(tab.id))}>×</button>
           </div>
         ))}
       </div>
-      <div className="files-menu-wrap">
-        <button className="files-menu-button" aria-expanded={filesOpen} onClick={() => setFilesOpen((open) => !open)}>Opened files</button>
-        {filesOpen && <div className="files-popover">
-          <input ref={searchBox} type="search" aria-label="Search opened files" placeholder="Search files" value={search} onChange={(event) => setSearch(event.target.value)} />
-          <div role="listbox" aria-label="Opened files">
-            {filtered.map((tab) => <button role="option" aria-selected={tab.id === props.activeTabId} key={tab.id} title={tab.path}
-              onClick={() => { props.onActivate(tab.id); setFilesOpen(false) }}>{tab.metadata?.name ?? tab.path}</button>)}
-          </div>
-        </div>}
-      </div>
+      {showTabScrollControls && <button type="button" className="tab-scroll-button" aria-label={copy.scrollTabsRight} disabled={!tabScrollState.canRight} onClick={() => scrollTabs(1)}>▶</button>}
       {menuState && <div role="menu" className="tab-menu" ref={menu} style={{ left: menuState.x, top: menuState.y }} onKeyDown={menuKeyDown}>
-        <button role="menuitem" onClick={() => menuAction('Close file', () => props.onClose(menuState.tab.id))}>Close</button>
-        <button role="menuitem" onClick={() => menuAction('Close files', () => props.onCloseOthers(menuState.tab.id))}>Close others</button>
-        <button role="menuitem" onClick={() => menuAction('Close files', () => props.onCloseRight(menuState.tab.id))}>Close right</button>
-        <button role="menuitem" onClick={() => menuAction('Copy path', async () => { if (!navigator.clipboard) throw new Error('Clipboard unavailable'); await navigator.clipboard.writeText(menuState.tab.path) })}>Copy path</button>
-        <button role="menuitem" onClick={() => menuAction('Reveal file', () => props.onReveal(menuState.tab.path))}>Reveal in file manager</button>
+        <button role="menuitem" onClick={() => menuAction('Close file', () => props.onClose(menuState.tab.id))}>{copy.closeFile}</button>
+        <button role="menuitem" onClick={() => menuAction('Close files', () => props.onCloseOthers(menuState.tab.id))}>{copy.closeOtherTabs}</button>
+        <button role="menuitem" onClick={() => menuAction('Close files', () => props.onCloseRight(menuState.tab.id))}>{copy.closeTabsToRight}</button>
+        <button role="menuitem" onClick={() => menuAction('Copy path', async () => { if (!navigator.clipboard) throw new Error('Clipboard unavailable'); await navigator.clipboard.writeText(menuState.tab.path) })}>{copy.copyPath}</button>
+        <button role="menuitem" onClick={() => menuAction('Reveal file', () => props.onReveal(menuState.tab.path))}>{copy.revealInFileManager}</button>
       </div>}
     </div>
   )

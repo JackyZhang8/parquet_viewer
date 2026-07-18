@@ -519,5 +519,14 @@ pub async fn cancel_query(query_id: String, state: State<'_, AppState>) -> Resul
     state.queries.cancel_query(&query_id)
 }
 
+#[tauri::command]
+pub async fn cancel_file_queries(
+    file_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    state.queries.close_file(&file_id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

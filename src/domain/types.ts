@@ -56,6 +56,16 @@ export type ExportSource =
   | { kind: 'sql'; sql: string }
   | { kind: 'filter'; query: FilterQueryRequest }
 
+export interface ExportInspectionRequest {
+  fileId: string
+  source: ExportSource
+}
+
+export interface ExportInspection {
+  estimatedRows: string
+  requiresConfirmation: boolean
+}
+
 export interface ExportRequest {
   fileId: string
   destination: string
@@ -77,8 +87,10 @@ export interface ExportProgress {
 }
 
 export type AppTheme = 'system' | 'light' | 'dark'
+export type AppLanguage = 'en' | 'zh'
 
 export interface AppSettings {
+  language: AppLanguage
   theme: AppTheme
   batchSize: number
   previewLimit: number
@@ -394,7 +406,8 @@ export const isExportProgress = (value: unknown): value is ExportProgress =>
 
 export const isAppSettings = (value: unknown): value is AppSettings =>
   isRecord(value) &&
-  hasExactKeys(value, ['theme', 'batchSize', 'previewLimit', 'memoryLimitMb', 'tempDirectory', 'tempDiskWarningMb', 'concurrency', 'restoreTabs']) &&
+  hasExactKeys(value, ['language', 'theme', 'batchSize', 'previewLimit', 'memoryLimitMb', 'tempDirectory', 'tempDiskWarningMb', 'concurrency', 'restoreTabs']) &&
+  (value.language === 'en' || value.language === 'zh') &&
   (value.theme === 'system' || value.theme === 'light' || value.theme === 'dark') &&
   typeof value.batchSize === 'number' && Number.isSafeInteger(value.batchSize) && value.batchSize >= 50 && value.batchSize <= 5000 &&
   typeof value.previewLimit === 'number' && Number.isSafeInteger(value.previewLimit) && value.previewLimit >= 100 && value.previewLimit <= 100000 &&
