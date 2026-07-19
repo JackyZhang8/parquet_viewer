@@ -57,13 +57,26 @@ const defaultViewState = (): SessionViewState => ({
   scrollTop: 0, scrollLeft: 0, sidebarWidth: 260, editorHeight: 180,
 })
 
+const MAX_U32 = 0xffff_ffff
+const MAX_U16 = 0xffff
+
+const persistUnsigned = (value: number, max: number, fallback: number) =>
+  Number.isFinite(value) ? Math.min(max, Math.max(0, Math.round(value))) : fallback
+
+const persistedViewState = (viewState: SessionViewState): SessionViewState => ({
+  scrollTop: persistUnsigned(viewState.scrollTop, MAX_U32, 0),
+  scrollLeft: persistUnsigned(viewState.scrollLeft, MAX_U32, 0),
+  sidebarWidth: persistUnsigned(viewState.sidebarWidth, MAX_U16, 260),
+  editorHeight: persistUnsigned(viewState.editorHeight, MAX_U16, 180),
+})
+
 let nextTab = 0
 const tabId = () => `tab-${Date.now().toString(36)}-${(++nextTab).toString(36)}`
 
 const snapshot = (state: WorkspaceState): SessionSnapshot => ({
   version: 1,
   tabs: state.tabs.map(({ id, fileId, path, sqlDraft, filters, sorts, viewState }) => ({
-    id, fileId, path, sqlDraft, filters, sorts, viewState,
+    id, fileId, path, sqlDraft, filters, sorts, viewState: persistedViewState(viewState),
   })),
   activeTabId: state.activeTabId,
 })

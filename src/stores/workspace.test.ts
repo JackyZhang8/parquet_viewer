@@ -177,6 +177,30 @@ describe('workspace store', () => {
     store.getState().dispose()
   })
 
+  it('normalizes fractional and out-of-range view state before saving a session', async () => {
+    const desktop = api()
+    const store = createWorkspaceStore(desktop)
+    await store.getState().hydrate()
+    await store.getState().openPaths(['/a.parquet'])
+    const tab = store.getState().tabs[0]!
+
+    store.getState().setViewState(tab.id, {
+      scrollTop: 12.5,
+      scrollLeft: -4.5,
+      sidebarWidth: Number.POSITIVE_INFINITY,
+      editorHeight: 70_000.4,
+    })
+    await store.getState().flushSave()
+
+    expect(vi.mocked(desktop.saveSession).mock.calls.at(-1)?.[0].tabs[0].viewState).toEqual({
+      scrollTop: 13,
+      scrollLeft: 0,
+      sidebarWidth: 260,
+      editorHeight: 65_535,
+    })
+    store.getState().dispose()
+  })
+
   it('clears a stale Session save error after a later successful save', async () => {
     const desktop = api({ saveSession: vi.fn().mockRejectedValueOnce(new Error('transient')).mockResolvedValueOnce(undefined) })
     const store = createWorkspaceStore(desktop)

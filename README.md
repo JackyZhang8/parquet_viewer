@@ -140,7 +140,7 @@ npm run tauri build
 ./build-win.sh
 ```
 
-该脚本需要 macOS、Rustup、Wine、`cargo-xwin` 和 Homebrew LLVM；详细的自动化检查、冒烟测试与大文件基准记录方式请见 [docs/testing.md](docs/testing.md)。
+该脚本可在 macOS 上交叉编译 Windows x64 可执行文件，不生成 NSIS 安装包。产物位于 `src-tauri/target/x86_64-pc-windows-msvc/release/parquet-viewer.exe`；如需分发，可将该文件与说明文档一起压缩发布。脚本需要 macOS、Rustup、`cargo-xwin` 和 Homebrew LLVM；详细的自动化检查、冒烟测试与大文件基准记录方式请见 [docs/testing.md](docs/testing.md)。
 
 ## 开发与贡献
 
