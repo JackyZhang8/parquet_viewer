@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/screenshot-1.png" alt="Parquet Viewer 主界面预览" width="1200" />
+  <img src="screenshots/screenshot-1.jpg" alt="Parquet Viewer 主界面预览" width="1000" />
 </p>
 
 > [!NOTE]
