@@ -41,3 +41,8 @@ parquet = { version = "57.3.1", features = ["arrow"] }
 tauri = { version = "2", features = ["test"] }
 tempfile = "3"
 filetime = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

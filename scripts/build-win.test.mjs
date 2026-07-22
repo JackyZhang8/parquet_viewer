@@ -8,6 +8,7 @@ const script = readFileSync(resolve(root, 'build-win.sh'), 'utf8')
 const config = JSON.parse(readFileSync(resolve(root, 'src-tauri/tauri.conf.json'), 'utf8'))
 const filesSource = readFileSync(resolve(root, 'src-tauri/src/files.rs'), 'utf8')
 const mainSource = readFileSync(resolve(root, 'src-tauri/src/main.rs'), 'utf8')
+const cargoManifest = readFileSync(resolve(root, 'src-tauri/Cargo.toml'), 'utf8')
 
 test('macOS build script cross-compiles a standalone Windows executable', () => {
   assert.match(script, /^#!\/usr\/bin\/env bash/m)
@@ -37,4 +38,15 @@ test('Windows release builds use the GUI subsystem without hiding debug diagnost
     mainSource,
     /#!\[cfg_attr\(\s*all\(target_os = "windows", not\(debug_assertions\)\),\s*windows_subsystem = "windows"\s*\)\]/s,
   )
+})
+
+test('release profile removes unused code and symbols while Windows builds use abort panics', () => {
+  const profile = cargoManifest.match(/\[profile\.release\]([\s\S]*?)(?:\n\[|$)/)?.[1]
+  assert.ok(profile)
+  assert.match(profile, /^lto = "thin"$/m)
+  assert.match(profile, /^codegen-units = 1$/m)
+  assert.match(profile, /^strip = "symbols"$/m)
+  assert.doesNotMatch(profile, /^panic\s*=/m)
+  assert.doesNotMatch(profile, /^opt-level = "z"$/m)
+  assert.match(script, /export RUSTFLAGS="\$\{RUSTFLAGS:-\} -C panic=abort"/)
 })

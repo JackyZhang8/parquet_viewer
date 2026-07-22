@@ -185,7 +185,7 @@ impl ExportService {
                 rows_written: 0,
                 error: Some(AppError::Cancelled(message)),
             },
-            Err(error) if cancelled.load(Ordering::Acquire) => ExportProgress {
+            Err(_error) if cancelled.load(Ordering::Acquire) => ExportProgress {
                 export_id: plan.export_id.clone(),
                 status: ExportStatus::Cancelled,
                 rows_written: 0,

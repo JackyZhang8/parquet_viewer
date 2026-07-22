@@ -56,6 +56,10 @@ rustup target add x86_64-pc-windows-msvc
 xwin_env="$(cargo xwin env --target x86_64-pc-windows-msvc --quiet)"
 eval "$xwin_env"
 
+# Tauri's macOS Objective-C dependencies require unwinding, but the portable
+# Windows release executable can omit unwind support to reduce its size.
+export RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort"
+
 echo "Cross-compiling the Windows executable with src-tauri/icons/icon.ico..."
 npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle
 
