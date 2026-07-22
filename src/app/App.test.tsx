@@ -6,6 +6,8 @@ import type { DesktopApi, OpenFileOutcome } from '../lib/tauri'
 import { createWorkspaceStore } from '../stores/workspace'
 import { App } from './App'
 
+vi.mock('../lib/monaco', () => ({}))
+
 const deferred = <T,>() => {
   let resolve!: (value: T) => void
   let reject!: (reason: unknown) => void
@@ -112,7 +114,6 @@ it('shows an opening progress bar for at least a short minimum after a file open
     fileId: 'slow', path: '/slow.parquet', name: 'slow.parquet', sizeBytes: '1', rowCount: '1', rowGroupCount: 1, columns: [],
   } }])
   await screen.findByRole('tab', { name: 'slow.parquet' })
-  await new Promise((resolve) => window.setTimeout(resolve, 150))
   expect(screen.getByRole('progressbar', { name: 'Opening files' })).toBeInTheDocument()
   await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'Opening files' })).not.toBeInTheDocument(), { timeout: 500 })
 })
@@ -201,11 +202,12 @@ it('opens exactly one on-demand query panel from the title bar', async () => {
   expect(screen.getByRole('region', { name: 'Filter query' })).toBeInTheDocument()
   expect(screen.queryByRole('textbox', { name: 'SQL editor' })).not.toBeInTheDocument()
 
-  await userEvent.click(sql)
+  fireEvent.click(sql)
   expect(filter).toHaveAttribute('aria-expanded', 'false')
   expect(sql).toHaveAttribute('aria-expanded', 'true')
   expect(screen.queryByRole('region', { name: 'Filter query' })).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Run SQL' })).toBeInTheDocument()
+  expect(screen.getByRole('progressbar', { name: 'Loading SQL editor' })).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: 'Run SQL' })).toBeInTheDocument()
 })
 
 it('puts Open Parquet files first among title-bar actions', () => {
@@ -242,7 +244,7 @@ it('wraps each expanded query tool in a styled panel container', async () => {
   )
   await userEvent.click(screen.getByRole('button', { name: 'SQL' }))
   expect(view.container.querySelector('.query-panel.query-panel-sql')).toContainElement(
-    screen.getByRole('button', { name: 'Run SQL' }),
+    await screen.findByRole('button', { name: 'Run SQL' }),
   )
 })
 

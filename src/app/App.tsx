@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from 'zustand'
 import { DropZone } from '../features/open/DropZone'
 import { FileTabs } from '../features/tabs/FileTabs'
 import { AppliedFilterChips, FilterBar } from '../features/query/FilterBar'
-import { SqlEditor } from '../features/query/SqlEditor'
 import { SettingsDialog } from '../features/settings/SettingsDialog'
 import { desktopApi, type DesktopApi } from '../lib/tauri'
 import { createWorkspaceStore, type WorkspaceState } from '../stores/workspace'
@@ -15,6 +14,8 @@ import { AboutDialog } from '../features/about/AboutDialog'
 import { labelsFor } from './labels'
 import { buildFilterQueryRequest } from '../features/query/filterSql'
 import './app.css'
+
+const SqlEditor = lazy(() => import('../features/query/SqlEditor').then((module) => ({ default: module.SqlEditor })))
 
 interface AppProps { api?: DesktopApi; store?: StoreApi<WorkspaceState> }
 
@@ -297,12 +298,18 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
               onRun={(request) => void state.runFilterQuery(active.id, request, settings.batchSize)} />
           </div>}
           {queryPanel === 'sql' && <div id={sqlPanelId} className="query-panel query-panel-sql">
-            <SqlEditor key={`sql-${active.id}`} tabId={active.id} fileId={active.fileId} value={active.sqlDraft}
-              columns={active.metadata.columns} height={active.viewState.editorHeight} error={sqlDraftError}
-              initialPreviewLimit={settings.previewLimit} language={settings.language} theme={settings.theme}
-              onChange={(sqlDraft) => state.setSqlDraft(active.id, sqlDraft)}
-              onRun={(previewLimit) => void state.runSqlQuery(active.id, active.sqlDraft, previewLimit, settings.batchSize)}
-              onHeightChange={(editorHeight) => state.setViewState(active.id, { editorHeight })} />
+            <Suspense fallback={<div className="sql-editor-shell sql-editor-loading" style={{ height: active.viewState.editorHeight }}
+              role="status" aria-live="polite" aria-busy="true">
+              <strong>{copy.loadingSqlEditor}</strong>
+              <div className="sql-editor-loading-bar" role="progressbar" aria-label={copy.loadingSqlEditor} />
+            </div>}>
+              <SqlEditor key={`sql-${active.id}`} tabId={active.id} fileId={active.fileId} value={active.sqlDraft}
+                columns={active.metadata.columns} height={active.viewState.editorHeight} error={sqlDraftError}
+                initialPreviewLimit={settings.previewLimit} language={settings.language} theme={settings.theme}
+                onChange={(sqlDraft) => state.setSqlDraft(active.id, sqlDraft)}
+                onRun={(previewLimit) => void state.runSqlQuery(active.id, active.sqlDraft, previewLimit, settings.batchSize)}
+                onHeightChange={(editorHeight) => state.setViewState(active.id, { editorHeight })} />
+            </Suspense>
           </div>}
           {queryPanel !== 'filter' && <AppliedFilterChips filters={appliedFilters} language={settings.language}
             onRemove={(index) => rerunAppliedFilters(appliedFilters.filter((_, current) => current !== index))}

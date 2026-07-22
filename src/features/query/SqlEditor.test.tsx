@@ -45,6 +45,7 @@ vi.mock('@monaco-editor/react', async () => {
     })
   } }
 })
+vi.mock('../../lib/monaco', () => ({}))
 
 import { columnNameAtPosition, containsMutatingSql, parseSqlErrorMarker, SqlEditor } from './SqlEditor'
 

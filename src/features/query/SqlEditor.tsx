@@ -1,6 +1,7 @@
 import MonacoEditor, { type OnMount } from '@monaco-editor/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { editor, languages, Position } from 'monaco-editor'
+import '../../lib/monaco'
 import { labelsFor } from '../../app/labels'
 import type { AppError, AppLanguage, AppTheme, ColumnSchema } from '../../domain/types'
 import { getSqlCompletions } from './sqlCompletion'
