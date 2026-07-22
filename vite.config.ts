@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath, URL } from "node:url";
 
@@ -22,6 +22,7 @@ export default defineConfig({
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
   },
   test: {
+    exclude: [...configDefaults.exclude, "scripts/**"],
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     maxWorkers: 4,

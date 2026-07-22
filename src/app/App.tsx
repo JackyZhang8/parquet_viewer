@@ -222,7 +222,7 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
       try {
         started = await api.startExport({ fileId: active.fileId, destination, overwrite, source })
       } catch (error) {
-        if (!isAppError(error) || error.code !== 'INVALID_ARGUMENT' || !/already exists/i.test(error.message) ||
+        if (!isAppError(error) || error.code !== 'ALREADY_EXISTS' ||
             !(await api.confirmExportOverwrite(destination))) throw error
         overwrite = true
         started = await api.startExport({ fileId: active.fileId, destination, overwrite, source })

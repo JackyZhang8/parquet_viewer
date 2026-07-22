@@ -354,7 +354,9 @@ fn available_space(path: &Path) -> Option<u64> {
         return None;
     }
     let stats = unsafe { stats.assume_init() };
-    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize))
+    // The cast is required on platforms where `f_bavail` is not already `u64`.
+    #[allow(clippy::unnecessary_cast)]
+    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
 }
 
 #[cfg(not(unix))]

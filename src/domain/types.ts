@@ -5,6 +5,7 @@ export type AppErrorCode =
   | 'INVALID_PARQUET'
   | 'STALE_FILE'
   | 'SQL_ERROR'
+  | 'ALREADY_EXISTS'
   | 'CANCELLED'
   | 'RESOURCE_EXHAUSTED'
   | 'INTERNAL_ERROR'
@@ -302,6 +303,7 @@ const APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
   'INVALID_PARQUET',
   'STALE_FILE',
   'SQL_ERROR',
+  'ALREADY_EXISTS',
   'CANCELLED',
   'RESOURCE_EXHAUSTED',
   'INTERNAL_ERROR',

@@ -24,7 +24,9 @@ use std::os::windows::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
-use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+};
 
 use crate::AppState;
 use crate::error::AppError;
@@ -485,7 +487,9 @@ fn file_identity(file: &File, _metadata: &Metadata) -> FileIdentity {
     }
     FileIdentity::Windows {
         volume_serial_number: Some(information.dwVolumeSerialNumber),
-        file_index: Some((u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow)),
+        file_index: Some(
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        ),
     }
 }
 

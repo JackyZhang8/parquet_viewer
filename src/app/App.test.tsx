@@ -412,7 +412,7 @@ it('exports the automatic preview, confirms overwrite, and renders terminal expo
   vi.mocked(desktop.pickCsvDestination).mockResolvedValue('/tmp/a.csv')
   vi.mocked(desktop.confirmExportOverwrite).mockResolvedValue(true)
   vi.mocked(desktop.startExport)
-    .mockRejectedValueOnce({ code: 'INVALID_ARGUMENT', message: 'Export destination already exists', detail: null })
+    .mockRejectedValueOnce({ code: 'ALREADY_EXISTS', message: 'Export destination already exists', detail: null })
     .mockResolvedValueOnce({ exportId: 'export-1' })
   vi.mocked(desktop.loadSession).mockResolvedValue({ snapshot: { version: 1, activeTabId: 'a', tabs: [
     { id: 'a', fileId: 'a', path: '/a.parquet', sqlDraft: 'SELECT id FROM data', filters: [], sorts: [], viewState: { scrollTop: 0, scrollLeft: 0, sidebarWidth: 260, editorHeight: 180 } },

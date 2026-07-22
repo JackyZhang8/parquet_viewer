@@ -76,6 +76,25 @@ impl ExportService {
         request: ExportInspectionRequest,
         files: &FileRegistry,
     ) -> Result<ExportInspection, AppError> {
+        // A filter export without predicates returns every row, so the Parquet
+        // metadata row count answers the inspection without executing the query.
+        if let ExportSource::Filter { query } = &request.source
+            && query.filters.is_empty()
+        {
+            let source = files.resolve_query_source(&request.file_id)?;
+            let metadata = files
+                .get(&request.file_id)
+                .ok_or_else(|| AppError::InvalidPath("Unknown file ID".into()))?;
+            let path = source
+                .duckdb_path
+                .to_str()
+                .ok_or_else(|| AppError::InvalidPath("File path is not valid UTF-8".into()))?;
+            compile_filter_export_query(path, &metadata.columns, query)?;
+            return Ok(ExportInspection {
+                estimated_rows: metadata.row_count,
+                requires_confirmation: metadata.row_count >= LARGE_EXPORT_WARNING_ROWS,
+            });
+        }
         let (source, sql, params) = build_export_query(&request.file_id, request.source, files)?;
         let estimated_rows =
             count_export_rows(&source, &sql, &params, files, &self.runtime_settings.read())?;
@@ -439,8 +458,10 @@ fn write_csv_batch(
     Ok(())
 }
 
+/// Empty strings are written as `""` so they stay distinguishable from NULL,
+/// which is written as a bare empty field.
 fn write_csv_value(writer: &mut BufWriter<std::fs::File>, value: &str) -> Result<(), AppError> {
-    let quoted = value.contains([',', '"', '\n', '\r']);
+    let quoted = value.is_empty() || value.contains([',', '"', '\n', '\r']);
     if quoted {
         writer.write_all(b"\"").map_err(export_write_error)?;
     }
@@ -505,7 +526,7 @@ fn validate_destination(destination: &str, overwrite: bool) -> Result<PathBuf, A
             ));
         }
         if !overwrite {
-            return Err(AppError::InvalidArgument(
+            return Err(AppError::AlreadyExists(
                 "Export destination already exists".into(),
             ));
         }
@@ -523,7 +544,7 @@ fn temporary_sibling(destination: &Path, export_id: &str) -> Result<PathBuf, App
 
 fn commit_temporary(temporary: &Path, destination: &Path, overwrite: bool) -> Result<(), AppError> {
     if !overwrite && destination.exists() {
-        return Err(AppError::InvalidArgument(
+        return Err(AppError::AlreadyExists(
             "Export destination already exists".into(),
         ));
     }
@@ -595,7 +616,7 @@ mod tests {
         Connection::open_in_memory()
             .unwrap()
             .execute_batch(&format!(
-                "COPY (SELECT range AS id, CASE range WHEN 0 THEN 'comma,value' WHEN 1 THEN 'quote\"value' WHEN 2 THEN 'line' || chr(10) || 'break' ELSE NULL END AS note FROM range({rows})) TO '{quoted}' (FORMAT PARQUET)"
+                "COPY (SELECT range AS id, CASE range WHEN 0 THEN 'comma,value' WHEN 1 THEN 'quote\"value' WHEN 2 THEN 'line' || chr(10) || 'break' WHEN 3 THEN '' ELSE NULL END AS note FROM range({rows})) TO '{quoted}' (FORMAT PARQUET)"
             ))
             .unwrap();
         let registry = FileRegistry::default();
@@ -638,7 +659,14 @@ mod tests {
         assert!(csv.contains("0,\"comma,value\""));
         assert!(csv.contains("1,\"quote\"\"value\""));
         assert!(csv.contains("2,\"line\nbreak\""));
-        assert!(csv.lines().any(|line| line == "3,"));
+        assert!(
+            csv.lines().any(|line| line == "3,\"\""),
+            "empty string should be quoted"
+        );
+        assert!(
+            csv.lines().any(|line| line == "4,"),
+            "NULL should be a bare empty field"
+        );
     }
 
     #[test]
@@ -829,7 +857,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(crate::error::AppError::InvalidArgument(_))
+            Err(crate::error::AppError::AlreadyExists(_))
         ));
         assert_eq!(fs::read_to_string(destination).unwrap(), "keep me");
         assert_eq!(service.active_count_for_test(), 0);

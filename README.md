@@ -65,8 +65,6 @@ npm ci
 npm run tauri dev
 ```
 
-macOS / Linux 用户也可以运行 `./dev.sh`。该脚本会在依赖缺失时安装前端依赖，并自动选择从 `1420` 开始的可用开发端口。
-
 ## SQL 使用说明
 
 当前打开的 Parquet 文件会映射为固定表名 `data`。例如：
@@ -90,7 +88,7 @@ LIMIT 20;
 
 为保证本地文件安全，SQL 有明确边界：
 
-- 仅接受一条 `SELECT` 或 `WITH ... SELECT` 查询；不支持 `INSERT`、`UPDATE`、`DELETE`、DDL 等写操作。
+- 仅接受一条 `SELECT` 或 `WITH ... SELECT` 查询；不支持 `INSERT`、`UPDATE`、`DELETE`、DDL 等写操作，也不支持 `UNION`、`EXCEPT`、`INTERSECT` 等集合操作。
 - 查询只能读取当前文件的 `data` 表或其 CTE；不能跨文件、跨 Schema / Catalog 查询。
 - 禁止文件、网络和扩展相关的 DuckDB 函数，例如 `read_parquet`、`read_csv`、`http_get`。
 - 预览查询不支持 `OFFSET`；请用 `LIMIT` 控制返回量。

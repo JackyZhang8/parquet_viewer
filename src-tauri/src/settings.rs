@@ -31,17 +31,12 @@ pub enum Theme {
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Language {
+    #[default]
     En,
     Zh,
-}
-
-impl Default for Language {
-    fn default() -> Self {
-        Self::En
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,7 +295,9 @@ pub async fn save_settings(
 mod tests {
     use std::fs;
 
-    use super::{AppSettings, Language, SettingsStore, Theme, default_memory_limit_mb, sanitize_settings};
+    use super::{
+        AppSettings, Language, SettingsStore, Theme, default_memory_limit_mb, sanitize_settings,
+    };
 
     #[test]
     fn defaults_match_the_mvp_and_memory_is_bounded_by_available_ram() {

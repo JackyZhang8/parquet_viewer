@@ -30,5 +30,5 @@ it('shows the open-source repository, license, and author', () => {
   expect(screen.getByText('开源协议')).toBeInTheDocument()
   expect(screen.getByText('Apache License 2.0')).toBeInTheDocument()
   expect(screen.getByText('作者')).toBeInTheDocument()
-  expect(screen.getByText('JackyZhang8')).toBeInTheDocument()
+  expect(screen.getByText('JackyZhang')).toBeInTheDocument()
 })

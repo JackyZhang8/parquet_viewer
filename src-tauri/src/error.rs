@@ -23,6 +23,8 @@ pub enum AppError {
         column: u64,
     },
     #[error("{0}")]
+    AlreadyExists(String),
+    #[error("{0}")]
     Cancelled(String),
     #[error("{0}")]
     ResourceExhausted(String),
@@ -39,6 +41,7 @@ impl AppError {
             Self::InvalidParquet(_) => "INVALID_PARQUET",
             Self::StaleFile(_) => "STALE_FILE",
             Self::Sql(_) | Self::SqlLocated { .. } => "SQL_ERROR",
+            Self::AlreadyExists(_) => "ALREADY_EXISTS",
             Self::Cancelled(_) => "CANCELLED",
             Self::ResourceExhausted(_) => "RESOURCE_EXHAUSTED",
             Self::Internal(_) => "INTERNAL_ERROR",
@@ -53,6 +56,7 @@ impl AppError {
             | Self::InvalidParquet(message)
             | Self::StaleFile(message)
             | Self::Sql(message)
+            | Self::AlreadyExists(message)
             | Self::Cancelled(message)
             | Self::ResourceExhausted(message) => message,
             Self::SqlLocated { message, .. } => message,
@@ -319,6 +323,7 @@ mod tests {
             ),
             (AppError::StaleFile("message".into()), "STALE_FILE"),
             (AppError::Sql("message".into()), "SQL_ERROR"),
+            (AppError::AlreadyExists("message".into()), "ALREADY_EXISTS"),
             (AppError::Cancelled("message".into()), "CANCELLED"),
             (
                 AppError::ResourceExhausted("message".into()),
