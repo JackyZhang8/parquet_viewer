@@ -159,6 +159,44 @@ describe('workspace store', () => {
     store.getState().dispose()
   })
 
+  it('restores the active tab first and makes it ready before background tabs finish', async () => {
+    const active = deferred<OpenFileOutcome[]>()
+    const first = deferred<OpenFileOutcome[]>()
+    const third = deferred<OpenFileOutcome[]>()
+    const snapshot: SessionSnapshot = {
+      version: 1,
+      activeTabId: 'two',
+      tabs: [
+        { id: 'one', fileId: 'old-one', path: '/one.parquet', sqlDraft: '', filters: [], sorts: [], viewState: { scrollTop: 0, scrollLeft: 0, sidebarWidth: 240, editorHeight: 180 } },
+        { id: 'two', fileId: 'old-two', path: '/two.parquet', sqlDraft: '', filters: [], sorts: [], viewState: { scrollTop: 0, scrollLeft: 0, sidebarWidth: 240, editorHeight: 180 } },
+        { id: 'three', fileId: 'old-three', path: '/three.parquet', sqlDraft: '', filters: [], sorts: [], viewState: { scrollTop: 0, scrollLeft: 0, sidebarWidth: 240, editorHeight: 180 } },
+      ],
+    }
+    const desktop = api({
+      loadSession: vi.fn(async () => ({ snapshot, unavailableTabIds: [], warning: null })),
+      openFiles: vi.fn((paths: string[]) => {
+        if (paths[0] === '/two.parquet') return active.promise
+        if (paths[0] === '/one.parquet') return first.promise
+        return third.promise
+      }),
+    })
+    const store = createWorkspaceStore(desktop)
+
+    const hydration = store.getState().hydrate()
+    await vi.waitFor(() => expect(desktop.openFiles).toHaveBeenCalledTimes(1))
+    expect(desktop.openFiles).toHaveBeenNthCalledWith(1, ['/two.parquet'])
+
+    active.resolve([{ ok: true, metadata: metadata('new-two', '/two.parquet') }])
+    await vi.waitFor(() => expect(store.getState().tabs.find((tab) => tab.id === 'two')?.status).toBe('ready'))
+    await vi.waitFor(() => expect(desktop.openFiles).toHaveBeenCalledTimes(3))
+    expect(store.getState().tabs.filter((tab) => tab.status === 'loading')).toHaveLength(2)
+
+    first.resolve([{ ok: true, metadata: metadata('new-one', '/one.parquet') }])
+    third.resolve([{ ok: true, metadata: metadata('new-three', '/three.parquet') }])
+    await hydration
+    expect(store.getState().tabs.every((tab) => tab.status === 'ready')).toBe(true)
+  })
+
   it('hydrates only once and saves a serializable snapshot without metadata or transient state', async () => {
     vi.useFakeTimers()
     const desktop = api()

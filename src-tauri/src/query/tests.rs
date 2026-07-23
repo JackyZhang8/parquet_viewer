@@ -147,6 +147,27 @@ fn streams_ten_rows_in_bounded_batches_and_removes_final_cursor() {
 }
 
 #[test]
+fn sends_a_small_first_batch_before_using_the_requested_batch_size() {
+    let (_directory, registry, file_id) = registered_fixture(650);
+    let service = QueryService::default();
+    let started = service
+        .start_query(request(file_id, "SELECT * FROM data", 500, 1_000), &registry)
+        .unwrap();
+
+    let first = service.fetch_query_batch(&started.query_id).unwrap();
+    assert_eq!(first.rows.len(), 100);
+    assert!(!first.done);
+
+    let second = service.fetch_query_batch(&started.query_id).unwrap();
+    assert_eq!(second.rows.len(), 500);
+    assert!(!second.done);
+
+    let final_batch = service.fetch_query_batch(&started.query_id).unwrap();
+    assert_eq!(final_batch.rows.len(), 50);
+    assert!(final_batch.done);
+}
+
+#[test]
 fn empty_query_returns_one_final_empty_batch() {
     let (_directory, registry, file_id) = registered_fixture(2);
     let service = QueryService::default();

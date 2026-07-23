@@ -85,13 +85,13 @@ export function DataGrid(props: Props) {
   const rowVirtualizer = useVirtualizer({
     count: rows.length, getScrollElement: () => scrollElement, estimateSize: () => ROW_HEIGHT,
     overscan: 4, initialRect: { width: 800, height: 360 }, initialOffset: props.initialScroll?.top ?? 0,
-    observeElementRect: observeRect, observeElementOffset: observeOffset,
+    observeElementRect: observeRect, observeElementOffset: observeOffset, useFlushSync: false,
   })
   const columnVirtualizer = useVirtualizer({
     horizontal: true, count: visible.length, getScrollElement: () => scrollElement,
     estimateSize: (index) => widths[visible[index]?.index] ?? 160, overscan: 2,
     initialRect: { width: 800, height: 360 }, initialOffset: props.initialScroll?.left ?? 0,
-    observeElementRect: observeRect, observeElementOffset: observeOffset,
+    observeElementRect: observeRect, observeElementOffset: observeOffset, useFlushSync: false,
   })
   const virtualRows = rowVirtualizer.getVirtualItems()
   const virtualColumns = columnVirtualizer.getVirtualItems()

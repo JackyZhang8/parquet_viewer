@@ -1,5 +1,6 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import { DropZone } from '../features/open/DropZone'
 import { FileTabs } from '../features/tabs/FileTabs'
 import { AppliedFilterChips, FilterBar } from '../features/query/FilterBar'
@@ -13,6 +14,7 @@ import { StatsPanel } from '../features/stats/StatsPanel'
 import { AboutDialog } from '../features/about/AboutDialog'
 import { labelsFor } from './labels'
 import { buildFilterQueryRequest } from '../features/query/filterSql'
+import { selectNextFileChangeCandidate } from './fileChangePolling'
 import './app.css'
 
 const SqlEditor = lazy(() => import('../features/query/SqlEditor').then((module) => ({ default: module.SqlEditor })))
@@ -32,7 +34,27 @@ const asSessionFilter = (filter: FilterCondition): SessionFilter => {
 
 export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
   const store = useMemo(() => suppliedStore ?? createWorkspaceStore(api), [api, suppliedStore])
-  const state = useStore(store)
+  const state = useStore(store, useShallow((workspace) => ({
+    tabs: workspace.tabs,
+    activeTabId: workspace.activeTabId,
+    opening: workspace.opening,
+    pathErrors: workspace.pathErrors,
+    warning: workspace.warning,
+    queriesByTab: workspace.queriesByTab,
+    reportError: workspace.reportError,
+    openPaths: workspace.openPaths,
+    activateTab: workspace.activateTab,
+    closeTab: workspace.closeTab,
+    closeOthers: workspace.closeOthers,
+    closeRight: workspace.closeRight,
+    setSqlDraft: workspace.setSqlDraft,
+    setFilters: workspace.setFilters,
+    setViewState: workspace.setViewState,
+    runFilterQuery: workspace.runFilterQuery,
+    runSqlQuery: workspace.runSqlQuery,
+    loadNextBatch: workspace.loadNextBatch,
+    cancelQuery: workspace.cancelQuery,
+  })))
   const [exportsByTab, setExportsByTab] = useState<Record<string, ExportProgress>>({})
   const [exportTotalsByTab, setExportTotalsByTab] = useState<Record<string, string>>({})
   const [exportPreparationByTab, setExportPreparationByTab] = useState<Record<string, boolean>>({})
@@ -42,6 +64,7 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
   const latestSettingsSave = useRef(0)
   const [settings, setSettings] = useState(defaultSettings)
   const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [startupReady, setStartupReady] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [statisticsOpen, setStatisticsOpen] = useState(false)
@@ -51,9 +74,25 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
   const [hiddenColumnsByTab, setHiddenColumnsByTab] = useState<Record<string, Set<string>>>({})
   const [loadingOperations, setLoadingOperations] = useState<{ id: number; message: string }[]>([])
   const ignoredExternalChanges = useRef(new Set<string>())
+  const fileChangePollCursor = useRef(0)
+  const pendingScroll = useRef<{ tabId: string; scrollTop: number; scrollLeft: number } | null>(null)
+  const scrollPersistenceTimer = useRef<number | undefined>(undefined)
   const pendingQueryReplays = useRef(new Set<string>())
   const nextLoadingOperation = useRef(0)
   const copy = labelsFor(settings.language)
+  const flushPendingScroll = useCallback(() => {
+    if (scrollPersistenceTimer.current !== undefined) window.clearTimeout(scrollPersistenceTimer.current)
+    scrollPersistenceTimer.current = undefined
+    const pending = pendingScroll.current
+    pendingScroll.current = null
+    if (pending) store.getState().setViewState(pending.tabId, { scrollTop: pending.scrollTop, scrollLeft: pending.scrollLeft })
+    return Boolean(pending)
+  }, [store])
+  const persistScroll = useCallback((tabId: string, scrollTop: number, scrollLeft: number) => {
+    pendingScroll.current = { tabId, scrollTop, scrollLeft }
+    if (scrollPersistenceTimer.current !== undefined) window.clearTimeout(scrollPersistenceTimer.current)
+    scrollPersistenceTimer.current = window.setTimeout(flushPendingScroll, 250)
+  }, [flushPendingScroll])
   const beginLoadingOperation = (message: string) => {
     const id = ++nextLoadingOperation.current
     const startedAt = Date.now()
@@ -69,26 +108,25 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
   }
   useEffect(() => {
     let disposed = false
-    let unlisten: (() => void) | undefined
     let unlistenExport: (() => void) | undefined
     store.getState().resume()
-    api.loadSettings().then((loaded) => {
-      if (disposed) return
-      setSettings(loaded)
-      document.documentElement.dataset.theme = loaded.theme
-      setSettingsLoaded(true)
-      return store.getState().hydrate(loaded.restoreTabs)
-    }).catch((error) => {
-      store.getState().reportError('Settings', error)
-      if (!disposed) setSettingsLoaded(true)
-      return store.getState().hydrate()
-    }).catch((error) => store.getState().reportError('Session restore', error))
-    api.onFileDrop((paths) => {
-      withLoadingOperation(copy.openingFilesProgress, () => store.getState().openPaths(paths))
-        .catch((error) => store.getState().reportError('File drop', error))
-    }).then((cleanup) => {
-      if (disposed) cleanup(); else unlisten = cleanup
-    }).catch((error) => store.getState().reportError('File drop', error))
+    void (async () => {
+      let restoreTabs = true
+      try {
+        const loaded = await api.loadSettings()
+        if (disposed) return
+        restoreTabs = loaded.restoreTabs
+        setSettings(loaded)
+        document.documentElement.dataset.theme = loaded.theme
+      } catch (error) {
+        store.getState().reportError('Settings', error)
+      } finally {
+        if (!disposed) setSettingsLoaded(true)
+      }
+      try { await store.getState().hydrate(restoreTabs) }
+      catch (error) { store.getState().reportError('Session restore', error) }
+      finally { if (!disposed) setStartupReady(true) }
+    })()
     api.onExportProgress((progress) => {
       const owner = exportOwners.current.get(progress.exportId)
       if (!owner) {
@@ -102,29 +140,50 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
     }).then((cleanup) => { if (disposed) cleanup(); else unlistenExport = cleanup })
       .catch((error) => store.getState().reportError('Export events', error))
     return () => {
-      disposed = true; unlisten?.(); unlistenExport?.(); exportOwners.current.clear(); pendingExportProgress.current.clear(); store.getState().dispose()
+      disposed = true; unlistenExport?.(); exportOwners.current.clear(); pendingExportProgress.current.clear()
+      if (flushPendingScroll()) void store.getState().flushSave()
+      store.getState().dispose()
     }
-  }, [api, store, suppliedStore])
+  }, [api, flushPendingScroll, store, suppliedStore])
   useEffect(() => {
+    if (!startupReady) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    api.onFileDrop((paths) => {
+      withLoadingOperation(copy.openingFilesProgress, () => store.getState().openPaths(paths))
+        .catch((error) => store.getState().reportError('File drop', error))
+    }).then((cleanup) => { if (disposed) cleanup(); else unlisten = cleanup })
+      .catch((error) => store.getState().reportError('File drop', error))
+    return () => { disposed = true; unlisten?.() }
+  }, [api, copy.openingFilesProgress, startupReady, store])
+  useEffect(() => {
+    if (!startupReady) return
     let disposed = false
     let checking = false
     const checkForExternalChanges = async () => {
-      if (checking) return
+      if (checking || document.visibilityState === 'hidden') return
       checking = true
       try {
-        for (const tab of store.getState().tabs) {
-          if (tab.status !== 'ready' || ignoredExternalChanges.current.has(tab.fileId)) continue
-          if (await api.isFileChanged(tab.fileId)) {
-            if (!disposed) setExternalChangeTabId((current) => current ?? tab.id)
-            return
-          }
+        const workspace = store.getState()
+        const selected = selectNextFileChangeCandidate(
+          workspace.tabs,
+          workspace.activeTabId,
+          ignoredExternalChanges.current,
+          fileChangePollCursor.current,
+        )
+        fileChangePollCursor.current = selected.nextCursor
+        const tab = selected.tab
+        if (!tab) return
+        if (await api.isFileChanged(tab.fileId)) {
+          if (!disposed) setExternalChangeTabId((current) => current ?? tab.id)
         }
       } finally { checking = false }
     }
-    const timer = window.setInterval(() => { void checkForExternalChanges() }, 2_000)
+    const timer = window.setInterval(checkForExternalChanges, 5_000)
     return () => { disposed = true; window.clearInterval(timer) }
-  }, [api, store])
+  }, [api, startupReady, store])
   const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0]
+  useEffect(() => { flushPendingScroll() }, [active?.id, flushPendingScroll])
   const loadingOperation = loadingOperations.at(-1)
   const externalChangeTab = externalChangeTabId ? state.tabs.find((tab) => tab.id === externalChangeTabId) : undefined
   const activeQuery = active ? state.queriesByTab[active.id] : undefined
@@ -277,11 +336,12 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
   }
   return (
     <main className="app-shell jetbrains-mono">
-      <header className="titlebar"><span className="app-mark">P</span><strong>Parquet Viewer</strong><div className="titlebar-actions"><DropZone compact language={settings.language} pickFiles={api.pickParquetFiles} onOpen={(paths) => withLoadingOperation(copy.openingFilesProgress, () => state.openPaths(paths))} onError={state.reportError} />{active?.status === 'ready' && active.metadata && <><button type="button" className="query-toggle" aria-expanded={queryPanel === 'filter'} aria-controls={filterPanelId} onClick={() => toggleQueryPanel('filter')}>{copy.filter}</button><button type="button" className="query-toggle" aria-expanded={queryPanel === 'sql'} aria-controls={sqlPanelId} onClick={() => toggleQueryPanel('sql')}>{copy.sql}</button><button type="button" className="statistics-toggle" aria-expanded={statisticsOpen} aria-controls="file-statistics" onClick={() => setStatisticsOpen((open) => !open)}>{copy.statistics}</button></>}<button type="button" className="about-button" onClick={() => setAboutOpen(true)}>{copy.about}</button><button type="button" className="settings-button" onClick={() => setSettingsOpen(true)}>{copy.settings}</button></div></header>
+      <header className="titlebar"><span className="app-mark">P</span><strong>Parquet Viewer</strong><div className="titlebar-actions"><DropZone compact disabled={!startupReady} language={settings.language} pickFiles={api.pickParquetFiles} onOpen={(paths) => withLoadingOperation(copy.openingFilesProgress, () => state.openPaths(paths))} onError={state.reportError} />{active?.status === 'ready' && active.metadata && <><button type="button" className="query-toggle" aria-expanded={queryPanel === 'filter'} aria-controls={filterPanelId} onClick={() => toggleQueryPanel('filter')}>{copy.filter}</button><button type="button" className="query-toggle" aria-expanded={queryPanel === 'sql'} aria-controls={sqlPanelId} onClick={() => toggleQueryPanel('sql')}>{copy.sql}</button><button type="button" className="statistics-toggle" aria-expanded={statisticsOpen} aria-controls="file-statistics" onClick={() => setStatisticsOpen((open) => !open)}>{copy.statistics}</button></>}<button type="button" className="about-button" onClick={() => setAboutOpen(true)}>{copy.about}</button><button type="button" className="settings-button" onClick={() => setSettingsOpen(true)}>{copy.settings}</button></div></header>
+      {!startupReady && <div className="operation-progress" role="status" aria-live="polite"><span>{copy.startingApp}</span><div className="operation-progress-bar" role="progressbar" aria-label={copy.startingApp} /></div>}
       {loadingOperation && <div className="operation-progress" role="status" aria-live="polite"><span>{loadingOperation.message}</span><div className="operation-progress-bar" role="progressbar" aria-label={loadingOperation.message} /></div>}
       {state.warning && <div className="warning-banner" role="status">{state.warning}</div>}
       {Object.entries(state.pathErrors).map(([path, error]) => <div className="error-banner" role="alert" key={path}><strong>{path.split(/[\\/]/).pop()}</strong>: {error.message}</div>)}
-      {state.tabs.length === 0 ? <div className="empty-workspace"><DropZone language={settings.language} pickFiles={api.pickParquetFiles} onOpen={(paths) => withLoadingOperation(copy.openingFilesProgress, () => state.openPaths(paths))} onError={state.reportError} />{state.opening > 0 && <p>{copy.openingFiles(state.opening)}</p>}</div> : <>
+      {state.tabs.length === 0 ? <div className="empty-workspace"><DropZone disabled={!startupReady} language={settings.language} pickFiles={api.pickParquetFiles} onOpen={(paths) => withLoadingOperation(copy.openingFilesProgress, () => state.openPaths(paths))} onError={state.reportError} />{state.opening > 0 && <p>{copy.openingFiles(state.opening)}</p>}</div> : <>
         <FileTabs tabs={state.tabs} activeTabId={state.activeTabId} onActivate={state.activateTab}
           onClose={(id) => closeWithConfirmation(1, () => state.closeTab(id))}
           onCloseOthers={(id) => closeWithConfirmation(state.tabs.filter((tab) => tab.id !== id).length, () => state.closeOthers(id))}
@@ -316,7 +376,7 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
             onClear={() => rerunAppliedFilters([])} />}
           <QueryResultPane key={`result-${active.id}`} query={state.queriesByTab[active.id]}
             initialScroll={{ top: active.viewState.scrollTop, left: active.viewState.scrollLeft }}
-            onScrollChange={({ top: scrollTop, left: scrollLeft }) => state.setViewState(active.id, { scrollTop, scrollLeft })}
+            onScrollChange={({ top: scrollTop, left: scrollLeft }) => persistScroll(active.id, scrollTop, scrollLeft)}
             onLoadMore={() => void state.loadNextBatch(active.id)} onRefresh={() => refreshQuery()} onCancel={() => void state.cancelQuery(active.id)}
             exportProgress={exportsByTab[active.id]} exportTotalRows={exportTotalsByTab[active.id]}
             exportPreparing={Boolean(exportPreparationByTab[active.id])}

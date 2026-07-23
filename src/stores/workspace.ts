@@ -258,42 +258,49 @@ export const createWorkspaceStore = (
           set({ tabs, activeTabId: restored.snapshot.activeTabId, warning: restored.warning })
           const available = tabs.filter((tab) => !unavailable.has(tab.id))
           if (available.length) {
-            let outcomes: OpenFileOutcome[]
-            try { outcomes = await api.openFiles(available.map((tab) => tab.path)) } catch (error) {
-              outcomes = available.map(() => ({ ok: false, error: sanitized(error) }))
-            }
-            let liveTabs = [...get().tabs]
-            let active = get().activeTabId
-            const errors = { ...get().pathErrors }
-            const successful = new Map<string, { original: WorkspaceTab; outcome: Extract<OpenFileOutcome, { ok: true }> }[]>()
-            available.forEach((original, index) => {
-              const outcome = outcomes[index] ?? { ok: false, error: sanitized(null) } as const
-              if (outcome.ok) {
-                const group = successful.get(outcome.metadata.fileId) ?? []
-                group.push({ original, outcome })
-                successful.set(outcome.metadata.fileId, group)
-                delete errors[original.path]
-              } else if (liveTabs.some((tab) => tab.id === original.id)) {
-                errors[original.path] = outcome.error
-                liveTabs = liveTabs.map((tab) => tab.id === original.id ? { ...tab, status: 'error', error: outcome.error } : tab)
+            const returnedIds = new Set<string>()
+            const openRestored = async (original: WorkspaceTab) => {
+              let outcome: OpenFileOutcome
+              try {
+                outcome = (await api.openFiles([original.path]))[0] ?? { ok: false, error: sanitized(null) }
+              } catch (error) { outcome = { ok: false, error: sanitized(error) } }
+              const current = get()
+              const liveOriginal = current.tabs.find((tab) => tab.id === original.id)
+              if (!outcome.ok) {
+                if (!liveOriginal) return
+                set({
+                  tabs: current.tabs.map((tab) => tab.id === original.id ? { ...tab, status: 'error', error: outcome.error } : tab),
+                  pathErrors: { ...current.pathErrors, [original.path]: outcome.error },
+                })
+                return
               }
-            })
-            const returnedIds = new Set(successful.keys())
-            for (const [fileId, group] of successful) {
-              const restoredIds = new Set(group.map(({ original }) => original.id))
-              const members = liveTabs.filter((tab) => restoredIds.has(tab.id) || (tab.status === 'ready' && tab.fileId === fileId))
-              if (!members.length) continue
-              const retained = members.find((tab) => tab.id === active) ?? members[0]
-              const restored = group.find(({ original }) => original.id === retained.id)
-              liveTabs = liveTabs
-                .filter((tab) => !members.some((member) => member.id === tab.id) || tab.id === retained.id)
-                .map((tab) => tab.id === retained.id && restored ? {
-                  ...tab, fileId, path: restored.outcome.metadata.path, metadata: restored.outcome.metadata,
-                  status: 'ready', error: undefined,
+              returnedIds.add(outcome.metadata.fileId)
+              if (!liveOriginal) return
+              const duplicate = current.tabs.find((tab) => tab.id !== original.id && tab.status === 'ready' && tab.fileId === outcome.metadata.fileId)
+              const retainOriginal = !duplicate || current.activeTabId === original.id
+              const retainedId = retainOriginal ? original.id : duplicate.id
+              const pathErrors = { ...current.pathErrors }
+              delete pathErrors[original.path]
+              const nextTabs = current.tabs
+                .filter((tab) => !duplicate || tab.id !== (retainOriginal ? duplicate.id : original.id))
+                .map((tab) => tab.id === retainedId ? {
+                  ...tab, fileId: outcome.metadata.fileId, path: outcome.metadata.path, metadata: outcome.metadata,
+                  status: 'ready' as const, error: undefined,
                 } : tab)
-              if (active && !liveTabs.some((tab) => tab.id === active)) active = retained.id
+              set({ tabs: nextTabs, pathErrors })
             }
-            set({ tabs: liveTabs, activeTabId: active, pathErrors: errors })
+            const active = available.find((tab) => tab.id === get().activeTabId)
+            if (active) await openRestored(active)
+            const background = available.filter((tab) => tab.id !== active?.id)
+            let next = 0
+            const worker = async () => {
+              while (next < background.length) {
+                const original = background[next++]
+                await openRestored(original)
+              }
+            }
+            await Promise.all(Array.from({ length: Math.min(2, background.length) }, worker))
+            const liveTabs = get().tabs
             for (const fileId of returnedIds) {
               if (!liveTabs.some((tab) => tab.status === 'ready' && tab.fileId === fileId)) {
                 try { await api.closeFile(fileId) } catch (error) { get().reportError(`Close ${fileId}`, error) }

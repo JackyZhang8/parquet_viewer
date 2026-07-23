@@ -6,10 +6,11 @@ interface DropZoneProps {
   onOpen(paths: string[]): void | Promise<void>
   onError?(key: string, error: unknown): void
   compact?: boolean
+  disabled?: boolean
   language?: AppLanguage
 }
 
-export function DropZone({ pickFiles, onOpen, onError, compact = false, language = 'en' }: DropZoneProps) {
+export function DropZone({ pickFiles, onOpen, onError, compact = false, disabled = false, language = 'en' }: DropZoneProps) {
   const copy = labelsFor(language)
   const choose = async () => {
     try {
@@ -17,13 +18,13 @@ export function DropZone({ pickFiles, onOpen, onError, compact = false, language
       if (paths?.length) await onOpen(paths)
     } catch (error) { onError?.('File picker', error) }
   }
-  if (compact) return <button className="open-button" onClick={() => void choose()}>{copy.openParquetFiles}</button>
+  if (compact) return <button className="open-button" disabled={disabled} onClick={() => void choose()}>{copy.openParquetFiles}</button>
   return (
     <section className="drop-zone" aria-label="File intake">
       <div className="drop-icon" aria-hidden="true">⇩</div>
       <h1>{copy.openParquetFiles}</h1>
       <p>{copy.dropFilesHint}</p>
-      <button className="primary-button" onClick={() => void choose()}>{copy.openParquetFiles}</button>
+      <button className="primary-button" disabled={disabled} onClick={() => void choose()}>{copy.openParquetFiles}</button>
     </section>
   )
 }

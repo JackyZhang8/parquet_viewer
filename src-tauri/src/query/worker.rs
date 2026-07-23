@@ -196,6 +196,7 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
 
     let mut returned_rows = 0_u64;
     let mut batch = Vec::with_capacity(job.batch_size);
+    let mut target_batch_size = job.initial_batch_size;
     let max_rows_bytes = MAX_BATCH_ENCODED_BYTES
         .checked_sub(batch_payload_overhead(&job.query_id)?)
         .ok_or_else(batch_resource_exhausted)?;
@@ -226,6 +227,7 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
                 .ok_or_else(batch_resource_exhausted)?;
             if !batch.is_empty() && candidate_bytes > max_rows_bytes {
                 send_batch(job, &mut batch, false, false, returned_rows, started)?;
+                target_batch_size = job.batch_size;
                 batch_rows_bytes = 2;
             }
             batch_rows_bytes = batch_rows_bytes
@@ -234,8 +236,9 @@ fn run_job_inner(job: &QueryJob, started: Instant, ready_sent: &mut bool) -> Res
                 .ok_or_else(batch_resource_exhausted)?;
             batch.push(converted);
             returned_rows += 1;
-            if batch.len() == job.batch_size {
+            if batch.len() == target_batch_size {
                 send_batch(job, &mut batch, false, false, returned_rows, started)?;
+                target_batch_size = job.batch_size;
                 batch_rows_bytes = 2;
             }
         }

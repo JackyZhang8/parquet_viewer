@@ -13,3 +13,14 @@ it('opens all picked paths and treats picker cancellation as a no-op', async () 
   await user.click(screen.getByRole('button', { name: /open parquet files/i }))
   expect(onOpen).toHaveBeenCalledTimes(1)
 })
+
+it('does not open the picker while disabled', async () => {
+  const pick = vi.fn(async () => ['/a.parquet'])
+  const onOpen = vi.fn()
+  render(<DropZone disabled pickFiles={pick} onOpen={onOpen} />)
+
+  await userEvent.click(screen.getByRole('button', { name: /open parquet files/i }))
+
+  expect(pick).not.toHaveBeenCalled()
+  expect(onOpen).not.toHaveBeenCalled()
+})

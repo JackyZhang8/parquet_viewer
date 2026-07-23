@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { StrictMode } from 'react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
+import type { AppSettings, RestoredSession } from '../domain/types'
 import type { DesktopApi, OpenFileOutcome } from '../lib/tauri'
 import { createWorkspaceStore } from '../stores/workspace'
 import { App } from './App'
@@ -43,6 +44,30 @@ const api = (): DesktopApi => ({
   revealItemInDir: vi.fn(async () => undefined),
 })
 
+it('gates file opening and drop subscription until startup restoration completes', async () => {
+  const desktop = api()
+  const settings = deferred<AppSettings>()
+  const session = deferred<RestoredSession>()
+  vi.mocked(desktop.loadSettings).mockImplementation(() => settings.promise)
+  vi.mocked(desktop.loadSession).mockImplementation(() => session.promise)
+
+  render(<App api={desktop} />)
+
+  expect(screen.getByRole('progressbar', { name: 'Starting Parquet Viewer' })).toBeInTheDocument()
+  expect(screen.getAllByRole('button', { name: 'Open Parquet files' })[0]).toBeDisabled()
+  expect(desktop.onFileDrop).not.toHaveBeenCalled()
+
+  settings.resolve({ language: 'en', theme: 'system', batchSize: 500, previewLimit: 10_000, memoryLimitMb: 512,
+    tempDirectory: null, tempDiskWarningMb: 1024, concurrency: 2, restoreTabs: true })
+  await waitFor(() => expect(desktop.loadSession).toHaveBeenCalledTimes(1))
+  expect(screen.getAllByRole('button', { name: 'Open Parquet files' })[0]).toBeDisabled()
+  expect(desktop.onFileDrop).not.toHaveBeenCalled()
+
+  session.resolve({ snapshot: { version: 1, tabs: [], activeTabId: null }, unavailableTabIds: [], warning: null })
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Open Parquet files' })[0]).toBeEnabled())
+  expect(desktop.onFileDrop).toHaveBeenCalledTimes(1)
+})
+
 it('hydrates, subscribes/unsubscribes drops, and switches from empty intake to workspace', async () => {
   const desktop = api()
   let drop: ((paths: string[]) => void) | undefined
@@ -52,6 +77,7 @@ it('hydrates, subscribes/unsubscribes drops, and switches from empty intake to w
   const view = render(<App api={desktop} store={store} />)
   expect((await screen.findAllByRole('button', { name: /open parquet files/i }))[0]).toBeInTheDocument()
   expect(desktop.loadSession).toHaveBeenCalledTimes(1)
+  await waitFor(() => expect(desktop.onFileDrop).toHaveBeenCalledTimes(1))
   drop?.(['/drop.parquet'])
   await waitFor(() => expect(screen.getByRole('tab', { name: /drop.parquet/i })).toBeInTheDocument())
   expect(screen.queryByRole('button', { name: 'Filters & SQL' })).not.toBeInTheDocument()
@@ -144,12 +170,9 @@ it('replays the displayed query when Refresh is selected from the data context m
 })
 
 it('prompts to reload an externally modified file and replays its query', async () => {
-  const interval = vi.spyOn(window, 'setInterval')
-  let checkForExternalChanges: (() => void) | undefined
-  interval.mockImplementation((callback, delay) => {
-    if (delay === 2_000) checkForExternalChanges = callback as () => void
-    return 1 as unknown as ReturnType<typeof window.setInterval>
-  })
+  const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  vi.useFakeTimers()
   try {
     const desktop = api()
     vi.mocked(desktop.openFiles).mockResolvedValue([{ ok: true, metadata: {
@@ -167,15 +190,77 @@ it('prompts to reload an externally modified file and replays its query', async 
     await store.getState().runFilterQuery(tab.id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 10_000 })
     render(<App api={desktop} store={store} />)
 
-    expect(checkForExternalChanges).toBeDefined()
-    act(() => { checkForExternalChanges?.() })
-    await waitFor(() => expect(desktop.isFileChanged).toHaveBeenCalledWith('changed'))
-    expect(await screen.findByRole('dialog', { name: 'File changed externally' })).toHaveTextContent('modified outside Parquet Viewer')
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() })
+    expect(screen.getAllByRole('button', { name: 'Open Parquet files' })[0]).toBeEnabled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(desktop.isFileChanged).toHaveBeenCalledWith('changed')
+    expect(screen.getByRole('dialog', { name: 'File changed externally' })).toHaveTextContent('modified outside Parquet Viewer')
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Reload file' })) })
 
     expect(desktop.reloadFile).toHaveBeenCalledWith('changed')
     expect(desktop.startFilterQuery).toHaveBeenCalledTimes(2)
-  } finally { interval.mockRestore() }
+  } finally {
+    vi.useRealTimers()
+    if (visibility) Object.defineProperty(document, 'visibilityState', visibility)
+  }
+})
+
+it('checks only the active file on the first external-change polling tick', async () => {
+  const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  const interval = vi.spyOn(window, 'setInterval')
+  let checkForExternalChanges: (() => void | Promise<void>) | undefined
+  interval.mockImplementation((callback, delay) => {
+    if (delay === 5_000) checkForExternalChanges = callback as () => void | Promise<void>
+    return 1 as unknown as ReturnType<typeof window.setInterval>
+  })
+  try {
+    const desktop = api()
+    const store = createWorkspaceStore(desktop)
+    await store.getState().openPaths(['/active.parquet', '/background.parquet'])
+    render(<App api={desktop} store={store} />)
+    await waitFor(() => expect(checkForExternalChanges).toBeDefined())
+
+    await act(async () => { await checkForExternalChanges?.() })
+    await waitFor(() => expect(desktop.isFileChanged).toHaveBeenCalledTimes(1))
+    expect(desktop.isFileChanged).toHaveBeenCalledWith(store.getState().tabs[0].fileId)
+  } finally {
+    interval.mockRestore()
+    if (visibility) Object.defineProperty(document, 'visibilityState', visibility)
+  }
+})
+
+it('debounces grid scroll persistence and saves only the latest position', async () => {
+  const desktop = api()
+  const store = createWorkspaceStore(desktop)
+  await store.getState().openPaths(['/scroll.parquet'])
+  const tab = store.getState().tabs[0]
+  await store.getState().runFilterQuery(tab.id, { selectedColumns: [], filters: [], sorts: [], previewLimit: 10_000 })
+  const setViewState = vi.spyOn(store.getState(), 'setViewState')
+  render(<App api={desktop} store={store} />)
+  const grid = await screen.findByRole('grid')
+  setViewState.mockClear()
+
+  vi.useFakeTimers()
+  try {
+    Object.defineProperties(grid, {
+      scrollTop: { configurable: true, writable: true, value: 10 },
+      scrollLeft: { configurable: true, writable: true, value: 5 },
+    })
+    fireEvent.scroll(grid)
+    grid.scrollTop = 40
+    grid.scrollLeft = 15
+    fireEvent.scroll(grid)
+
+    expect(setViewState).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(249)
+    expect(setViewState).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(setViewState).toHaveBeenCalledTimes(1)
+    expect(setViewState).toHaveBeenCalledWith(tab.id, { scrollTop: 40, scrollLeft: 15 })
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 it('opens exactly one on-demand query panel from the title bar', async () => {
