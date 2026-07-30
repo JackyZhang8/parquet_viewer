@@ -6,3 +6,4 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 /docs/
+.DS_Store
