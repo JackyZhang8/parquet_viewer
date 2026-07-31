@@ -1,6 +1,6 @@
 [package]
 name = "parquet-viewer"
-version = "0.1.0"
+version = "0.1.1"
 description = "A read-only desktop Parquet viewer"
 authors = ["Parquet Viewer contributors"]
 edition = "2024"
