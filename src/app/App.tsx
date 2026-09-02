@@ -375,6 +375,7 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
             onRemove={(index) => rerunAppliedFilters(appliedFilters.filter((_, current) => current !== index))}
             onClear={() => rerunAppliedFilters([])} />}
           <QueryResultPane key={`result-${active.id}`} query={state.queriesByTab[active.id]}
+            fileRowCount={active.metadata.rowCount}
             initialScroll={{ top: active.viewState.scrollTop, left: active.viewState.scrollLeft }}
             onScrollChange={({ top: scrollTop, left: scrollLeft }) => persistScroll(active.id, scrollTop, scrollLeft)}
             onLoadMore={() => void state.loadNextBatch(active.id)} onRefresh={() => refreshQuery()} onCancel={() => void state.cancelQuery(active.id)}

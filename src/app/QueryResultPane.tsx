@@ -6,6 +6,7 @@ import type { AppLanguage, ExportProgress } from '../domain/types'
 
 interface Props {
   query?: QueryViewState
+  fileRowCount?: string
   initialScroll: { top: number; left: number }
   onScrollChange(scroll: { top: number; left: number }): void
   onLoadMore(): void
@@ -21,15 +22,17 @@ interface Props {
   language?: AppLanguage
 }
 
-export function QueryResultPane({ query, initialScroll, onScrollChange, onLoadMore, onRefresh, onCancel, exportProgress, exportTotalRows, exportPreparing, onExport, onCancelExport, hiddenColumnNames, onHiddenColumnNamesChange, language }: Props) {
+export function QueryResultPane({ query, fileRowCount, initialScroll, onScrollChange, onLoadMore, onRefresh, onCancel, exportProgress, exportTotalRows, exportPreparing, onExport, onCancelExport, hiddenColumnNames, onHiddenColumnNamesChange, language }: Props) {
   const [visibleRange, setVisibleRange] = useState<[number, number] | null>(null)
   if (!query || query.status === 'idle') return <div className="result-placeholder"><strong>No query result</strong><p>Run a query to preview rows.</p></div>
+  const isUnfilteredPreview = query.source === 'filter' && !query.stale && query.submittedFilter?.filters.length === 0
+  const totalRows = isUnfilteredPreview && fileRowCount ? fileRowCount : String(query.rows.length)
   return <div className="result-pane">
     <DataGrid queryKey={`${query.generation}:${query.queryId ?? 'queued'}`} columns={query.columns} rows={query.rows} status={query.status} done={query.done} loading={query.loadingBatch}
       initialScroll={initialScroll} onScrollChange={onScrollChange} onLoadMore={onLoadMore} onVisibleRangeChange={setVisibleRange}
       hiddenColumnNames={hiddenColumnNames} onHiddenColumnNamesChange={onHiddenColumnNamesChange} onRefresh={onRefresh} language={language} />
     <StatusBar status={query.status} elapsedMs={query.elapsedMs} returnedRows={query.returnedRows}
-      visibleRange={visibleRange} totalRows={query.rows.length} loading={query.loadingBatch} truncated={query.truncated}
+      visibleRange={visibleRange} totalRows={totalRows} loading={query.loadingBatch} truncated={query.truncated}
       stale={query.stale} error={query.error} onCancel={onCancel}
       canExport={query.hasSuccessfulResult && !query.stale && ((query.source === 'sql' && Boolean(query.submittedSql)) || (query.source === 'filter' && Boolean(query.submittedFilter)))}
       exportProgress={exportProgress} exportTotalRows={exportTotalRows} exportPreparing={exportPreparing}

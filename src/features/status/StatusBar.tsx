@@ -6,7 +6,7 @@ interface Props {
   elapsedMs: string
   returnedRows: string
   visibleRange: [number, number] | null
-  totalRows: number
+  totalRows: string | number
   loading?: boolean
   truncated?: boolean
   stale?: boolean
@@ -23,7 +23,7 @@ interface Props {
 export function StatusBar(props: Props) {
   const { status, elapsedMs, returnedRows, visibleRange, totalRows, loading, truncated, stale, error, onCancel,
     canExport, exportProgress, exportTotalRows, exportPreparing, onExport, onCancelExport } = props
-  const formatCount = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  const formatCount = (value: string | number) => String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   const exportPercent = (() => {
     if (!exportProgress || !exportTotalRows || exportTotalRows === '0') return undefined
     try {
@@ -37,7 +37,7 @@ export function StatusBar(props: Props) {
       {(loading || status === 'queued') && <span className="status-spinner" aria-label="Loading batch" />} {label}
     </span>
     <span>{elapsedMs} ms</span><span>{returnedRows} returned</span>
-    <span>{visibleRange ? `Rows ${visibleRange[0]}–${visibleRange[1]} of ${totalRows}` : `${totalRows} rows`}</span>
+    <span>{visibleRange ? `Rows ${formatCount(visibleRange[0])}–${formatCount(visibleRange[1])} of ${formatCount(totalRows)}` : `${formatCount(totalRows)} rows`}</span>
     {truncated && <span className="status-warning">Preview capped</span>}
     {stale && <span className="status-warning">Stale result</span>}
     {error && <span className="status-error" role="alert"><strong>{error.code}</strong>: {error.message}</span>}
