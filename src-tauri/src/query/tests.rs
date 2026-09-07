@@ -151,7 +151,10 @@ fn sends_a_small_first_batch_before_using_the_requested_batch_size() {
     let (_directory, registry, file_id) = registered_fixture(650);
     let service = QueryService::default();
     let started = service
-        .start_query(request(file_id, "SELECT * FROM data", 500, 1_000), &registry)
+        .start_query(
+            request(file_id, "SELECT * FROM data", 500, 1_000),
+            &registry,
+        )
         .unwrap();
 
     let first = service.fetch_query_batch(&started.query_id).unwrap();
