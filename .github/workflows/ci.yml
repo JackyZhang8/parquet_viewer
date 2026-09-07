@@ -9,7 +9,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-22.04]
+        # Keep Windows on the same stable MSVC image used by release builds.
+        # windows-latest moved to Visual Studio 18/MSVC 14.51, which currently
+        # fails to compile the bundled DuckDB 1.4.2 sources.
+        os: [macos-latest, windows-2022, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
