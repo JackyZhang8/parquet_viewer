@@ -18,7 +18,8 @@ export function syncVersion(root) {
   }
   const cargoLock = read('src-tauri/Cargo.lock')
   const blocks = cargoLock.split('[[package]]')
-  const index = blocks.findIndex((block) => block.includes(`\nname = "${name}"\n`))
+  const index = blocks.findIndex((block) =>
+    block.split(/\r?\n/).some((line) => line.trim() === `name = "${name}"`))
   if (index < 0) throw new Error('Application package was not found in Cargo.lock')
   blocks[index] = blocks[index].replace(/\nversion = "[^"]+"/, `\nversion = "${version}"`)
   const npmLock = JSON.parse(read('package-lock.json'))
