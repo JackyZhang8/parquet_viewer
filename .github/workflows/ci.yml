@@ -7,7 +7,7 @@ on:
 jobs:
   test-and-build:
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         # Keep Windows on the same stable MSVC image used by release builds.
         # windows-latest moved to Visual Studio 18/MSVC 14.51, which currently
@@ -23,20 +23,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Update Windows C++ runtime
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Bundled DuckDB uses the MSVC C++ runtime. An older runtime can
-          # terminate the test executable with STATUS_ENTRYPOINT_NOT_FOUND.
-          $installer = Join-Path $env:RUNNER_TEMP 'vc_redist.x64.exe'
-          Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $installer
-          $process = Start-Process -FilePath $installer -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
-          # 1638: a newer runtime is installed; 3010: installed, reboot requested.
-          if ($process.ExitCode -notin @(0, 1638, 3010)) {
-            throw "Visual C++ runtime installation failed: $($process.ExitCode)"
-          }
-          Write-Host "Visual C++ runtime installer exit code: $($process.ExitCode)"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
@@ -44,6 +30,26 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Diagnose Windows loader failures
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe was not found' }
+          Get-ChildItem 'src-tauri/target/debug/deps/parquet_viewer_lib-*.exe' | ForEach-Object {
+            Write-Host "::group::Imports for $($_.Name)"
+            & $dumpbin.FullName /IMPORTS $_.FullName
+            Write-Host '::endgroup::'
+          }
+          $directories = @('src-tauri/target/debug/deps', "$env:WINDIR\System32") + ($env:PATH -split ';')
+          $directories | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique | ForEach-Object {
+            Get-ChildItem -LiteralPath $_ -Filter '*.dll' -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '^(msvcp|vcruntime)' } |
+              Select-Object FullName, @{Name='Version'; Expression={$_.VersionInfo.FileVersion}}
+          } | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
       - run: npm test -- --run
       - run: npm run build
       - run: npm run tauri build
