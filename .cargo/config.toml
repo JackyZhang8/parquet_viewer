@@ -1,0 +1,5 @@
+[target.x86_64-pc-windows-msvc]
+# Keep Rust and bundled C/C++ dependencies (including DuckDB) on the same
+# static runtime, so tests and the application do not depend on the runner's
+# MSVCP140/VCRUNTIME140 DLL versions or DLL search path.
+rustflags = ["-C", "target-feature=+crt-static"]

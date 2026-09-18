@@ -23,6 +23,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Configure and verify Windows static runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Keep this in the tracked workflow: an untracked local .cargo config
+          # is not available after actions/checkout on the runner.
+          $flags = '-C target-feature=+crt-static'
+          "RUSTFLAGS=$flags" >> $env:GITHUB_ENV
+          $env:RUSTFLAGS = $flags
+
+          # Ask Cargo (not just rustc) to resolve the flags before building DuckDB.
+          # This tiny crate needs no dependencies and does not link an executable.
+          $probe = Join-Path $env:RUNNER_TEMP 'parquet-crt-probe'
+          New-Item -ItemType Directory -Force "$probe/src" | Out-Null
+          @('[package]', 'name = "parquet-crt-probe"', 'version = "0.0.0"', 'edition = "2024"') |
+            Set-Content "$probe/Cargo.toml"
+          Set-Content "$probe/src/lib.rs" ''
+          $cfg = & cargo rustc --manifest-path "$probe/Cargo.toml" --offline --lib -- --print cfg
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify Cargo runtime flags' }
+          if ($cfg -notcontains 'target_feature="crt-static"') {
+            throw 'Windows static CRT is not enabled; refusing to build with ineffective flags'
+          }
+          Write-Host 'Verified: Cargo enables crt-static for Windows Rust and bundled C/C++ dependencies.'
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
