@@ -2,6 +2,12 @@ import { render, screen } from '@testing-library/react'
 import { expect, it } from 'vitest'
 
 import { AboutDialog } from './AboutDialog'
+import { version } from '../../../package.json'
+
+it.each([['en', 'Version'], ['zh', '版本']] as const)('shows the package version in %s', (language, prefix) => {
+  render(<AboutDialog language={language} onClose={() => undefined} />)
+  expect(screen.getByText(`${prefix} ${version}`)).toBeInTheDocument()
+})
 
 it('presents a spacious product introduction in English', () => {
   render(<AboutDialog language="en" onClose={() => undefined} />)

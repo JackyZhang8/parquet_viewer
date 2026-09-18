@@ -1,3 +1,4 @@
+import { version } from '../../package.json'
 import type { AppLanguage, FilterOperator } from '../domain/types'
 
 const filterOperators = (values: Record<FilterOperator, string>) => values
@@ -7,7 +8,7 @@ export const labels = {
     settings: 'Settings',
     about: 'About',
     aboutDialog: 'About Parquet Viewer',
-    aboutVersion: 'Version 0.1.2',
+    aboutVersion: `Version ${version}`,
     aboutEyebrow: 'LOCAL DATA WORKSPACE',
     aboutHeadline: 'See your Parquet data with clarity.',
     aboutDescription: 'A fast, local desktop viewer for Parquet files.',
@@ -126,7 +127,7 @@ export const labels = {
     settings: '设置',
     about: '关于',
     aboutDialog: '关于 Parquet Viewer',
-    aboutVersion: '版本 0.1.2',
+    aboutVersion: `版本 ${version}`,
     aboutEyebrow: '本地数据工作台',
     aboutHeadline: '让 Parquet 数据，一目了然。',
     aboutDescription: '一款快速、本地运行的 Parquet 文件桌面查看器。',

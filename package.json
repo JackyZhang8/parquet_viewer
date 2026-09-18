@@ -1,7 +1,7 @@
 {
   "name": "parquet-viewer",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,12 @@
     "test": "vitest --passWithNoTests",
     "test:scripts": "node --test \"scripts/**/*.test.mjs\"",
     "test:watch": "vitest",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "version:sync": "node scripts/sync-version.mjs",
+    "prepare": "npm run version:sync",
+    "predev": "npm run version:sync",
+    "prebuild": "npm run version:sync",
+    "pretauri": "npm run version:sync"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

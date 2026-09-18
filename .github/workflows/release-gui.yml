@@ -60,31 +60,13 @@ jobs:
         run: |
           set -euo pipefail
           expected="${{ steps.version.outputs.version }}"
-          tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
-          npm_version="$(jq -r '.version' package.json)"
-          cargo_version="$(awk '
-            /^\[package\]$/ { package_section=1; next }
-            /^\[/ { package_section=0 }
-            package_section && /^version = / {
-              gsub(/[" ]/, "", $3)
-              print $3
-              exit
-            }
-          ' src-tauri/Cargo.toml)"
-
-          failed=0
-          for entry in \
-            "src-tauri/tauri.conf.json:$tauri_version" \
-            "package.json:$npm_version" \
-            "src-tauri/Cargo.toml:$cargo_version"; do
-            file="${entry%%:*}"
-            actual="${entry#*:}"
-            if [ "$actual" != "$expected" ]; then
-              echo "::error::$file version is $actual, expected $expected"
-              failed=1
-            fi
-          done
-          exit "$failed"
+          # package.json is the source for About and src-tauri/tauri.conf.json.
+          # npm ci synchronizes src-tauri/Cargo.toml before building.
+          actual="$(jq -r '.version' package.json)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::package.json version is $actual, expected $expected"
+            exit 1
+          fi
 
   build:
     name: Build ${{ matrix.artifact_suffix }}

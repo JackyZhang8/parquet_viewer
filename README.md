@@ -171,3 +171,14 @@ npm run build
 ---
 
 如果 Parquet Viewer 对你有帮助，欢迎给仓库点个 Star，也欢迎分享你的使用反馈。⭐
+
+## 版本号维护
+
+应用版本的唯一维护位置是根目录 `package.json` 的 `version`，例如 `0.1.2`。
+Tauri 配置和中英文“关于”页面直接读取该值；`npm ci`、`npm install`、
+`npm run dev`、`npm run build` 和 `npm run tauri -- ...` 会自动同步 Cargo
+及 npm 锁文件中的应用版本，不修改依赖版本。
+
+如果直接运行 Cargo 命令，请先执行 `npm run version:sync`。发布时使用与
+`package.json` 一致的标签（例如 `parquet-gui-v0.1.2`）；发布流程会检查一致性。
+同步产生的文件可以随版本变更一起提交，无需逐个手工编辑。
