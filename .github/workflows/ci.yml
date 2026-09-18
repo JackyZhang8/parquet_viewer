@@ -23,6 +23,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Update Windows C++ runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Bundled DuckDB uses the MSVC C++ runtime. An older runtime can
+          # terminate the test executable with STATUS_ENTRYPOINT_NOT_FOUND.
+          $installer = Join-Path $env:RUNNER_TEMP 'vc_redist.x64.exe'
+          Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $installer
+          $process = Start-Process -FilePath $installer -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
+          # 1638: a newer runtime is installed; 3010: installed, reboot requested.
+          if ($process.ExitCode -notin @(0, 1638, 3010)) {
+            throw "Visual C++ runtime installation failed: $($process.ExitCode)"
+          }
+          Write-Host "Visual C++ runtime installer exit code: $($process.ExitCode)"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
