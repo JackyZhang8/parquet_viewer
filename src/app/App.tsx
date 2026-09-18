@@ -42,6 +42,7 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
     warning: workspace.warning,
     queriesByTab: workspace.queriesByTab,
     reportError: workspace.reportError,
+    dismissError: workspace.dismissError,
     openPaths: workspace.openPaths,
     activateTab: workspace.activateTab,
     closeTab: workspace.closeTab,
@@ -340,7 +341,10 @@ export function App({ api = desktopApi, store: suppliedStore }: AppProps) {
       {!startupReady && <div className="operation-progress" role="status" aria-live="polite"><span>{copy.startingApp}</span><div className="operation-progress-bar" role="progressbar" aria-label={copy.startingApp} /></div>}
       {loadingOperation && <div className="operation-progress" role="status" aria-live="polite"><span>{loadingOperation.message}</span><div className="operation-progress-bar" role="progressbar" aria-label={loadingOperation.message} /></div>}
       {state.warning && <div className="warning-banner" role="status">{state.warning}</div>}
-      {Object.entries(state.pathErrors).map(([path, error]) => <div className="error-banner" role="alert" key={path}><strong>{path.split(/[\\/]/).pop()}</strong>: {error.message}</div>)}
+      {Object.entries(state.pathErrors).map(([path, error]) => <div className="error-banner" role="alert" key={path}>
+        <span className="error-banner-message"><strong>{path.split(/[\\/]/).pop()}</strong>: {error.message}</span>
+        <button type="button" className="error-banner-close" aria-label={copy.dismissError} title={copy.dismissError} onClick={() => state.dismissError(path)}>×</button>
+      </div>)}
       {state.tabs.length === 0 ? <div className="empty-workspace"><DropZone disabled={!startupReady} language={settings.language} pickFiles={api.pickParquetFiles} onOpen={(paths) => withLoadingOperation(copy.openingFilesProgress, () => state.openPaths(paths))} onError={state.reportError} />{state.opening > 0 && <p>{copy.openingFiles(state.opening)}</p>}</div> : <>
         <FileTabs tabs={state.tabs} activeTabId={state.activeTabId} onActivate={state.activateTab}
           onClose={(id) => closeWithConfirmation(1, () => state.closeTab(id))}

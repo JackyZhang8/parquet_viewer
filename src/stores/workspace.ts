@@ -32,6 +32,7 @@ export interface WorkspaceState {
   warning: string | null
   queriesByTab: Record<string, QueryViewState>
   reportError(key: string, error: unknown): void
+  dismissError(key: string): void
   resume(): void
   openPaths(paths: string[]): Promise<void>
   hydrate(restoreTabs?: boolean): Promise<void>
@@ -313,6 +314,7 @@ export const createWorkspaceStore = (
       return hydrating
     },
     reportError(key, error) { set((state) => ({ pathErrors: { ...state.pathErrors, [key]: sanitized(error) } })) },
+    dismissError: clearError,
     resume() { disposed = false },
     activateTab: (id) => { if (get().tabs.some((tab) => tab.id === id)) { set({ activeTabId: id }); scheduleSave() } },
     closeTab: (id) => closeIds(new Set([id])),

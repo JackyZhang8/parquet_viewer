@@ -18,6 +18,10 @@ button:focus-visible,[role=tab]:focus-visible,input:focus-visible,select:focus-v
 .drop-zone { width:min(510px,70vw); padding:44px; text-align:center; border:1px dashed #aeb7c6; border-radius:16px; background:color-mix(in srgb,var(--panel) 88%,transparent); }
 .drop-zone h1 { margin:12px 0 5px; font-size:22px; }.drop-zone p,.placeholder-copy { color:var(--muted); }.drop-icon { font-size:35px; color:var(--accent); }
 .warning-banner,.error-banner { padding:7px 14px; font-size:13px; border-bottom:1px solid var(--line); }.warning-banner { background:#fff5cf; }.error-banner { color:var(--danger); background:#fff0f1; }
+.error-banner { display:flex; align-items:center; gap:12px; }
+.error-banner-message { flex:1; min-width:0; overflow-wrap:anywhere; }
+.error-banner-close { flex:none; border:0; border-radius:4px; background:transparent; padding:2px 7px; font-size:18px; line-height:1; cursor:pointer; }
+.error-banner-close:hover { background:color-mix(in srgb,currentColor 10%,transparent); }
 .tabs-bar { position:relative; display:flex; height:39px; border-bottom:1px solid var(--line); background:var(--panel); }
 .file-tabs { min-width:0; flex:1; display:flex; overflow-x:auto; scrollbar-width:thin; }
 .tab-scroll-button { width:30px; flex:none; border:0; border-right:1px solid var(--line); background:var(--panel); color:var(--muted); cursor:pointer; font-size:11px; }.file-tabs + .tab-scroll-button { border-right:0; border-left:1px solid var(--line); }.tab-scroll-button:hover:not(:disabled) { color:inherit; background:var(--accent-soft); }.tab-scroll-button:disabled { cursor:default; opacity:.35; }
