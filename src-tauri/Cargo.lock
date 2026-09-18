@@ -3104,6 +3104,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "duckdb",
+ "embed-resource",
  "filetime",
  "libc",
  "parking_lot",
