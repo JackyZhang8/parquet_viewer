@@ -52,27 +52,56 @@ jobs:
       - run: npm ci
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Run Rust tests
+        id: rust-tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Diagnose Windows loader failures
-        if: failure() && runner.os == 'Windows'
+        if: failure() && runner.os == 'Windows' && steps.rust-tests.outcome == 'failure'
+        continue-on-error: true
         shell: pwsh
         run: |
+          # Compilation failures need not produce a test executable. Resolve
+          # Cargo's output directory rather than assuming target/debug/deps.
+          $metadata = & cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host 'Cargo metadata unavailable; see the original Rust test failure above.'
+            exit 0
+          }
+          $targetDirectory = ($metadata | ConvertFrom-Json).target_directory
+          if (-not (Test-Path -LiteralPath $targetDirectory -PathType Container)) {
+            Write-Host 'No Cargo output directory; see the original Rust test failure above.'
+            exit 0
+          }
+          $executables = @(Get-ChildItem -LiteralPath $targetDirectory -Recurse -File -Filter 'parquet_viewer_lib-*.exe' |
+            Where-Object { $_.Directory.Name -eq 'deps' })
+          if ($executables.Count -eq 0) {
+            Write-Host 'No test executable was generated; see the original compilation failure above.'
+            exit 0
+          }
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $vswhere)) {
+            Write-Host 'vswhere.exe unavailable; skipping DLL diagnostics.'
+            exit 0
+          }
           $vs = & $vswhere -latest -products '*' -property installationPath
-          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $dumpbin) { throw 'dumpbin.exe was not found' }
-          Get-ChildItem 'src-tauri/target/debug/deps/parquet_viewer_lib-*.exe' | ForEach-Object {
+          if (-not $dumpbin) {
+            Write-Host 'dumpbin.exe unavailable; skipping DLL diagnostics.'
+            exit 0
+          }
+          $executables | ForEach-Object {
             Write-Host "::group::Imports for $($_.Name)"
             & $dumpbin.FullName /IMPORTS $_.FullName
             Write-Host '::endgroup::'
           }
-          $directories = @('src-tauri/target/debug/deps', "$env:WINDIR\System32") + ($env:PATH -split ';')
+          $directories = @($executables | ForEach-Object { $_.DirectoryName }) + @("$env:WINDIR\System32") + ($env:PATH -split ';')
           $directories | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique | ForEach-Object {
             Get-ChildItem -LiteralPath $_ -Filter '*.dll' -ErrorAction SilentlyContinue |
               Where-Object { $_.Name -match '^(msvcp|vcruntime)' } |
               Select-Object FullName, @{Name='Version'; Expression={$_.VersionInfo.FileVersion}}
           } | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
+          exit 0
       - run: npm test -- --run
       - run: npm run build
       - run: npm run tauri build
